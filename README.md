@@ -1,20 +1,18 @@
-Mixtli Transfer 3000 — Frontend v2.4.1
-========================================
+Mixtli Transfer 3000 — Backend v2.4.2 (All-in-One)
+=====================================================
+- server.js (SDK v3 + selftest)
+- package.json
+- .env.example
 
-Archivos
---------
-- index.html
-- styles.css
-- app.js
+Render:
+- Build:  npm install --no-audit --no-fund
+- Start:  node server.js
 
-Cómo usar
----------
-1) Despliega estos archivos en Netlify (sitio estático).
-2) En la interfaz, pega tu **Backend URL** (Render) y guarda.
-3) Elige archivos, ajusta la expiración y pulsa **Subir todo**.
+Pruebas:
+- GET /api/health
+- GET /api/debug-cred
+- GET /api/selftest   ← diagnostica credenciales/permiso/escritura
 
-Detalles técnicos
------------------
-- Solicita presign a `POST /api/presign` con `{ files: [{name,size,type}], expiresSeconds }`.
-- Sube con **XMLHttpRequest** y `body: file` para progreso real (sin `duplex`).
-- Muestra enlaces `getUrl` (24h) y `objectUrl` (no público salvo que abras el bucket).
+Notas:
+- R2 usa SigV4 y path-style (ya configurado).
+- GET presign 24h máx recomendado.

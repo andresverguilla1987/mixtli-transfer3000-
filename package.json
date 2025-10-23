@@ -1,7 +1,7 @@
 {
   "name": "mixtli-transfer3000",
-  "version": "2.4.1",
-  "description": "Mixtli Transfer 3000 \u2014 Backend Render + Cloudflare R2 + Netlify",
+  "version": "2.4.2",
+  "description": "Mixtli Transfer 3000 \u2014 Backend Render + Cloudflare R2 + Netlify (All-in-One)",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
