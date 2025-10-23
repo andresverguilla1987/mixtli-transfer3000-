@@ -1,5 +1,5 @@
 /**
- * Mixtli Transfer 3000 — Backend v2.3.4
+ * Mixtli Transfer 3000 — Backend v2.3.5
  * Render + Cloudflare R2 (S3-compatible) + Netlify
  */
 const express = require('express');
@@ -13,21 +13,25 @@ const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan('tiny'));
 
-/* ----------------------- VARS: R2 ó S3 (compat) ----------------------- */
-// Acepta tanto R2_* como S3_*. Si S3_* no están, toma de R2_*.
+/* ───────────────── Vars: R2 ó S3 (compat) ───────────────── */
 const S3_ENDPOINT =
-  process.env.S3_ENDPOINT || process.env.R2_ENDPOINT; // ej: https://xxxx.r2.cloudflarestorage.com
+  process.env.S3_ENDPOINT || process.env.R2_ENDPOINT; // p.ej. https://xxxx.r2.cloudflarestorage.com
 const S3_BUCKET =
   process.env.S3_BUCKET || process.env.R2_BUCKET;
 const S3_ACCESS_KEY_ID =
-  process.env.S3_ACCESS_KEY_ID || process.env.R2_ACCESS_KEY_ID;
+  (process.env.S3_ACCESS_KEY_ID || process.env.R2_ACCESS_KEY_ID || '').trim();
 const S3_SECRET_ACCESS_KEY =
-  process.env.S3_SECRET_ACCESS_KEY || process.env.R2_SECRET_ACCESS_KEY;
+  (process.env.S3_SECRET_ACCESS_KEY || process.env.R2_SECRET_ACCESS_KEY || '').trim();
 
 // Normaliza endpoint (sin slash final)
 const ENDPOINT = (S3_ENDPOINT || '').replace(/\/+$/, '');
 
-/* ----------------------------- CORS ----------------------------------- */
+// Pequeña validación (no bloquea, solo advierte en logs)
+if (!S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY || !ENDPOINT || !S3_BUCKET) {
+  console.warn('[WARN] Variables S3/R2 incompletas. Revisa .env en Render.');
+}
+
+/* ─────────────────────────── CORS ────────────────────────── */
 function parseAllowedOrigins() {
   try {
     const raw = process.env.ALLOWED_ORIGINS;
@@ -35,7 +39,7 @@ function parseAllowedOrigins() {
     const arr = JSON.parse(raw);
     return Array.isArray(arr) ? arr : [];
   } catch {
-    console.error('ALLOWED_ORIGINS mal formateado. Usa JSON, ej. ["https://tu-dominio"]');
+    console.error('ALLOWED_ORIGINS mal formateado. Usa JSON. Ej: ["https://tu-netlify.netlify.app"]');
     return [];
   }
 }
@@ -43,8 +47,7 @@ const ALLOWED = parseAllowedOrigins();
 
 app.use(cors({
   origin(origin, cb) {
-    // Permitir sin Origin (curl/SSR/Render health)
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true);           // curl/SSR/health
     if (ALLOWED.includes(origin)) return cb(null, true);
     return cb(new Error('CORS: Origin no permitido: ' + origin), false);
   },
@@ -60,20 +63,20 @@ app.use(cors({
   ]
 }));
 
-/* ---------------------------- S3 / R2 --------------------------------- */
-// Forzar SigV4 (R2 NO soporta SigV2). Path-style recomendado.
+/* ───────────────────────── S3 / R2 ──────────────────────── */
+// R2 exige SigV4 y path-style
 const s3 = new AWS.S3({
   accessKeyId: S3_ACCESS_KEY_ID,
   secretAccessKey: S3_SECRET_ACCESS_KEY,
-  endpoint: ENDPOINT,               // string ok para SDK v2
-  signatureVersion: 'v4',           // <- OBLIGATORIO en R2
-  s3ForcePathStyle: true,           // recomendado para R2
+  endpoint: ENDPOINT,
+  signatureVersion: 'v4',
+  s3ForcePathStyle: true,
   region: process.env.S3_REGION || 'auto'
 });
 
 const BUCKET = S3_BUCKET;
 
-/* ---------------------------- HEALTH ---------------------------------- */
+/* ─────────────────────────── Health ─────────────────────── */
 app.get(['/salud', '/api/health'], (req, res) => {
   res.json({
     ok: true,
@@ -83,11 +86,23 @@ app.get(['/salud', '/api/health'], (req, res) => {
   });
 });
 
-/* --------------------------- PRESIGN API -------------------------------
+/* Debug: confirmar que Render tiene las creds correctas (longitud y preview) */
+app.get('/api/debug-cred', (req, res) => {
+  const id = S3_ACCESS_KEY_ID || null;
+  res.json({
+    ok: true,
+    accessKeyId_len: id ? id.length : 0,
+    accessKeyId_preview: id ? `${id.slice(0, 4)}...${id.slice(-4)}` : null,
+    endpoint: ENDPOINT,
+    bucket: BUCKET
+  });
+});
+
+/* ──────────────────────── Presign API ──────────────────────
  * POST /api/presign
  * body: { files: [{name, size, type}], expiresSeconds? }
  * return: { ok, results: [{ key, putUrl, getUrl, objectUrl, expiresSeconds }] }
- ----------------------------------------------------------------------- */
+ * ─────────────────────────────────────────────────────────── */
 app.post('/api/presign', async (req, res) => {
   try {
     const { files = [], expiresSeconds } = req.body || {};
@@ -103,7 +118,7 @@ app.post('/api/presign', async (req, res) => {
       const key = `${new Date().toISOString().slice(0, 10)}/${uuidv4()}-${safeName}`;
       const contentType = f.type || 'application/octet-stream';
 
-      // Firma PUT (subida) — Debe coincidir Content-Type con el que enviará el cliente
+      // PUT presign — ContentType debe coincidir con lo que enviará el cliente
       const putUrl = await s3.getSignedUrlPromise('putObject', {
         Bucket: BUCKET,
         Key: key,
@@ -111,14 +126,14 @@ app.post('/api/presign', async (req, res) => {
         Expires: exp
       });
 
-      // Firma GET (descarga) — 24h máx recomendado
+      // GET presign — 24h recomendado
       const getUrl = await s3.getSignedUrlPromise('getObject', {
         Bucket: BUCKET,
         Key: key,
         Expires: Math.min(exp, 60 * 60 * 24)
       });
 
-      // URL “cruda” del objeto (NO pública salvo que abras el bucket)
+      // URL "cruda" (no pública salvo que abras el bucket)
       const objectUrl = `${ENDPOINT}/${BUCKET}/${encodeURIComponent(key)}`;
 
       return { key, putUrl, getUrl, objectUrl, expiresSeconds: exp };
@@ -131,7 +146,7 @@ app.post('/api/presign', async (req, res) => {
   }
 });
 
-/* -------------------------- LISTADO SIMPLE ---------------------------- */
+/* ─────────────────────── Listado simple ─────────────────── */
 app.get('/api/list', async (req, res) => {
   try {
     const prefix = req.query.prefix || '';
@@ -148,8 +163,8 @@ app.get('/api/list', async (req, res) => {
   }
 });
 
-/* ------------------------------ BOOT ---------------------------------- */
+/* ─────────────────────────── Boot ───────────────────────── */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log('Mixtli Transfer 3000 v2.3.4 listening on', PORT);
+  console.log('Mixtli Transfer 3000 v2.3.5 listening on', PORT);
 });
