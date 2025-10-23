@@ -1,37 +1,32 @@
 /**
- * Mixtli Transfer 3000 — Backend v2.3.5
+ * Mixtli Transfer 3000 — Backend v2.4.0
  * Render + Cloudflare R2 (S3-compatible) + Netlify
  */
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const { v4: uuidv4 } = require('uuid');
-const AWS = require('aws-sdk');
 require('dotenv').config();
+
+/* AWS SDK v3 */
+const { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan('tiny'));
 
-/* ───────────────── Vars: R2 ó S3 (compat) ───────────────── */
-const S3_ENDPOINT =
-  process.env.S3_ENDPOINT || process.env.R2_ENDPOINT; // p.ej. https://xxxx.r2.cloudflarestorage.com
-const S3_BUCKET =
-  process.env.S3_BUCKET || process.env.R2_BUCKET;
-const S3_ACCESS_KEY_ID =
-  (process.env.S3_ACCESS_KEY_ID || process.env.R2_ACCESS_KEY_ID || '').trim();
-const S3_SECRET_ACCESS_KEY =
-  (process.env.S3_SECRET_ACCESS_KEY || process.env.R2_SECRET_ACCESS_KEY || '').trim();
+/* ───────────── Vars: R2 / S3 ───────────── */
+const S3_ENDPOINT = (process.env.S3_ENDPOINT || process.env.R2_ENDPOINT || '').replace(/\/+$/, '');
+const S3_BUCKET   = process.env.S3_BUCKET || process.env.R2_BUCKET || '';
+const S3_ACCESS_KEY_ID     = (process.env.S3_ACCESS_KEY_ID || process.env.R2_ACCESS_KEY_ID || '').trim();
+const S3_SECRET_ACCESS_KEY = (process.env.S3_SECRET_ACCESS_KEY || process.env.R2_SECRET_ACCESS_KEY || '').trim();
 
-// Normaliza endpoint (sin slash final)
-const ENDPOINT = (S3_ENDPOINT || '').replace(/\/+$/, '');
-
-// Pequeña validación (no bloquea, solo advierte en logs)
-if (!S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY || !ENDPOINT || !S3_BUCKET) {
+if (!S3_ENDPOINT || !S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
   console.warn('[WARN] Variables S3/R2 incompletas. Revisa .env en Render.');
 }
 
-/* ─────────────────────────── CORS ────────────────────────── */
+/* ───────────── CORS ───────────── */
 function parseAllowedOrigins() {
   try {
     const raw = process.env.ALLOWED_ORIGINS;
@@ -47,7 +42,7 @@ const ALLOWED = parseAllowedOrigins();
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);           // curl/SSR/health
+    if (!origin) return cb(null, true);  // curl/SSR/health
     if (ALLOWED.includes(origin)) return cb(null, true);
     return cb(new Error('CORS: Origin no permitido: ' + origin), false);
   },
@@ -63,80 +58,78 @@ app.use(cors({
   ]
 }));
 
-/* ───────────────────────── S3 / R2 ──────────────────────── */
-// R2 exige SigV4 y path-style
-const s3 = new AWS.S3({
-  accessKeyId: S3_ACCESS_KEY_ID,
-  secretAccessKey: S3_SECRET_ACCESS_KEY,
-  endpoint: ENDPOINT,
-  signatureVersion: 'v4',
-  s3ForcePathStyle: true,
-  region: process.env.S3_REGION || 'auto'
+/* ───────────── S3 Client (R2) ─────────────
+   - R2 requiere SigV4 y path-style
+*/
+const s3 = new S3Client({
+  region: process.env.S3_REGION || 'auto',
+  endpoint: S3_ENDPOINT,            // ej: https://xxxxxxxx.r2.cloudflarestorage.com
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: S3_ACCESS_KEY_ID,
+    secretAccessKey: S3_SECRET_ACCESS_KEY
+  }
 });
 
+/* ───────────── Helpers ───────────── */
 const BUCKET = S3_BUCKET;
 
-/* ─────────────────────────── Health ─────────────────────── */
+function safeName(name) {
+  return (name || 'file').replace(/[^\w.\-]/g, '_');
+}
+function objUrl(key) {
+  return `${S3_ENDPOINT}/${BUCKET}/${encodeURIComponent(key)}`;
+}
+
+/* ───────────── Health ───────────── */
 app.get(['/salud', '/api/health'], (req, res) => {
-  res.json({
-    ok: true,
-    bucket: BUCKET,
-    endpoint: ENDPOINT,
-    time: new Date().toISOString()
-  });
+  res.json({ ok: true, bucket: BUCKET, endpoint: S3_ENDPOINT, time: new Date().toISOString() });
 });
 
-/* Debug: confirmar que Render tiene las creds correctas (longitud y preview) */
+/* Debug: ver longitud de la accessKey para confirmar en Render */
 app.get('/api/debug-cred', (req, res) => {
   const id = S3_ACCESS_KEY_ID || null;
   res.json({
     ok: true,
     accessKeyId_len: id ? id.length : 0,
     accessKeyId_preview: id ? `${id.slice(0, 4)}...${id.slice(-4)}` : null,
-    endpoint: ENDPOINT,
+    endpoint: S3_ENDPOINT,
     bucket: BUCKET
   });
 });
 
-/* ──────────────────────── Presign API ──────────────────────
- * POST /api/presign
- * body: { files: [{name, size, type}], expiresSeconds? }
- * return: { ok, results: [{ key, putUrl, getUrl, objectUrl, expiresSeconds }] }
- * ─────────────────────────────────────────────────────────── */
+/* ───────────── Presign ─────────────
+   body: { files: [{name, size, type}], expiresSeconds? }
+*/
 app.post('/api/presign', async (req, res) => {
   try {
     const { files = [], expiresSeconds } = req.body || {};
     if (!Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ ok: false, error: 'files[] requerido' });
     }
-
-    // Expiración: 60s – 7 días
+    // 60s–7d
     const exp = Math.min(Math.max(parseInt(expiresSeconds || 3600, 10), 60), 60 * 60 * 24 * 7);
 
     const results = await Promise.all(files.map(async (f) => {
-      const safeName = (f.name || 'file').replace(/[^\w.\-]/g, '_');
-      const key = `${new Date().toISOString().slice(0, 10)}/${uuidv4()}-${safeName}`;
+      const name = safeName(f.name);
+      const key = `${new Date().toISOString().slice(0, 10)}/${uuidv4()}-${name}`;
       const contentType = f.type || 'application/octet-stream';
 
-      // PUT presign — ContentType debe coincidir con lo que enviará el cliente
-      const putUrl = await s3.getSignedUrlPromise('putObject', {
-        Bucket: BUCKET,
-        Key: key,
-        ContentType: contentType,
-        Expires: exp
-      });
+      // PUT
+      const putCmd = new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType });
+      const putUrl = await getSignedUrl(s3, putCmd, { expiresIn: exp });
 
-      // GET presign — 24h recomendado
-      const getUrl = await s3.getSignedUrlPromise('getObject', {
-        Bucket: BUCKET,
-        Key: key,
-        Expires: Math.min(exp, 60 * 60 * 24)
-      });
+      // GET (máx recomendado 24h)
+      const getCmd = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+      const getUrl = await getSignedUrl(s3, getCmd, { expiresIn: Math.min(exp, 86400) });
 
-      // URL "cruda" (no pública salvo que abras el bucket)
-      const objectUrl = `${ENDPOINT}/${BUCKET}/${encodeURIComponent(key)}`;
-
-      return { key, putUrl, getUrl, objectUrl, expiresSeconds: exp };
+      return {
+        key,
+        putUrl,
+        getUrl,
+        objectUrl: objUrl(key),
+        expiresSeconds: exp
+      };
     }));
 
     res.json({ ok: true, results });
@@ -146,12 +139,12 @@ app.post('/api/presign', async (req, res) => {
   }
 });
 
-/* ─────────────────────── Listado simple ─────────────────── */
+/* ───────────── Listado simple ───────────── */
 app.get('/api/list', async (req, res) => {
   try {
     const prefix = req.query.prefix || '';
-    const data = await s3.listObjectsV2({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 50 }).promise();
-    const items = (data.Contents || []).map(o => ({
+    const out = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 50 }));
+    const items = (out.Contents || []).map(o => ({
       key: o.Key,
       size: o.Size,
       lastModified: o.LastModified
@@ -163,8 +156,8 @@ app.get('/api/list', async (req, res) => {
   }
 });
 
-/* ─────────────────────────── Boot ───────────────────────── */
+/* ───────────── Boot ───────────── */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log('Mixtli Transfer 3000 v2.3.5 listening on', PORT);
+  console.log('Mixtli Transfer 3000 v2.4.0 listening on', PORT);
 });
