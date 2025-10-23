@@ -1,12 +1,9 @@
 {
   "name": "mixtli-transfer3000",
   "version": "2.3.3",
-  "private": false,
-  "type": "commonjs",
   "main": "server.js",
-  "engines": {
-    "node": ">=18"
-  },
+  "type": "commonjs",
+  "engines": { "node": "18.x" },
   "scripts": {
     "start": "node server.js",
     "build": "echo \"No build step\""
