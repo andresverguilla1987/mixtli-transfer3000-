@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mixtli Transfer 3000 — Frontend v2.4.1</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Mixtli Transfer 3000 <span class="badge">v2.4.1</span></h1>
+      <div class="cfg">
+        <label>Backend URL:
+          <input id="backendUrl" type="url" placeholder="https://mixtli-transfer3000.onrender.com" />
+        </label>
+        <label>Expiración (seg, máx 7 días):
+          <input id="expires" type="number" min="60" max="604800" step="60" value="3600" />
+        </label>
+        <button id="btnHealth" class="secondary">Probar /api/health</button>
+      </div>
+    </header>
+
+    <section class="drop">
+      <div id="dropzone" class="dropzone">
+        <p>Arrastra y suelta archivos aquí</p>
+        <p>o usa <button id="btnPick" class="link">Elegir archivos</button></p>
+        <input id="fileInput" type="file" multiple hidden />
+      </div>
+    </section>
+
+    <section class="actions">
+      <button id="btnUpload" class="primary">Subir todo</button>
+      <button id="btnClear" class="secondary">Limpiar</button>
+    </section>
+
+    <section>
+      <div class="progress-total">
+        <div id="totalBar" class="bar" style="width:0%"></div>
+        <span id="totalPct">0%</span>
+      </div>
+    </section>
+
+    <section id="list"></section>
+
+    <footer>
+      <small>Frontend estático (Netlify). Usa PUT con <code>Blob/File</code> directo (sin streaming) para compatibilidad con navegadores y evitar <code>duplex</code>.</small>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,25 +1,20 @@
-Mixtli Transfer 3000 — Backend v2.4.1
-===============================================
+Mixtli Transfer 3000 — Frontend v2.4.1
+========================================
 
-Contenido
----------
-- server.js               → API (Express + AWS SDK v3)
-- package.json            → dependencias
-- .env.example            → ejemplo de variables de entorno
-- README.md               → este archivo
-
-Deploy en Render
-----------------
-1) Crea un nuevo servicio **Web** y apunta al repo/carpeta que contenga estos archivos.
-2) **Environment** (copiar desde `.env.example` y completar credenciales R2).
-3) Build Command:
-   npm install --no-audit --no-fund
-4) Start Command:
-   node server.js
-5) Probar:
-   - GET /api/health
-   - GET /api/debug-cred
-
-Frontend
+Archivos
 --------
-fetch(putUrl, { method: 'PUT', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+- index.html
+- styles.css
+- app.js
+
+Cómo usar
+---------
+1) Despliega estos archivos en Netlify (sitio estático).
+2) En la interfaz, pega tu **Backend URL** (Render) y guarda.
+3) Elige archivos, ajusta la expiración y pulsa **Subir todo**.
+
+Detalles técnicos
+-----------------
+- Solicita presign a `POST /api/presign` con `{ files: [{name,size,type}], expiresSeconds }`.
+- Sube con **XMLHttpRequest** y `body: file` para progreso real (sin `duplex`).
+- Muestra enlaces `getUrl` (24h) y `objectUrl` (no público salvo que abras el bucket).
