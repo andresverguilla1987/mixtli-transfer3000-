@@ -1,6 +1,6 @@
 {
   "name": "mixtlitransfer3000-backend",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "type": "module",
   "main": "server.js",
   "engines": {
