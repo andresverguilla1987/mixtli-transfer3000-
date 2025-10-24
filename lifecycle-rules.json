@@ -1,0 +1,18 @@
+{
+  "recommendation": "Use per-plan prefixes to match expirations precisely",
+  "prefixes": {
+    "FREE": {
+      "prefix": "mt/FREE/",
+      "delete_after_days": 30
+    },
+    "PRO": {
+      "prefix": "mt/PRO/",
+      "delete_after_days": 7
+    },
+    "PROMAX": {
+      "prefix": "mt/PROMAX/",
+      "delete_after_days": 22
+    }
+  },
+  "note": "If you keep single prefix mt/, set delete_after_days=30 and rely on sweeper to purge earlier for PRO/PROMAX."
+}

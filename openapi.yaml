@@ -1,0 +1,102 @@
+
+openapi: 3.0.3
+info:
+  title: MixtliTransfer3000 API
+  version: "1.0"
+servers:
+  - url: https://mixtli-transfer3000.onrender.com
+paths:
+  /api/auth/register:
+    post:
+      summary: Register with email or phone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    email: { type: string, format: email }
+                  required: [email]
+                - type: object
+                  properties:
+                    phone: { type: string }
+                  required: [phone]
+      responses:
+        "200":
+          description: OTP sent (email or SMS)
+  /api/auth/verify-otp:
+    post:
+      summary: Verify OTP and get token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+                otp: { type: string }
+              required: [otp]
+      responses:
+        "200":
+          description: Auth OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      plan: { type: string }
+  /api/me:
+    get:
+      summary: Get current user and usage window
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Current profile + usage (30d)
+  /api/presign:
+    post:
+      summary: Get signed URLs (enforces plan limits)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filename: { type: string }
+                contentType: { type: string }
+                contentLength: { type: integer }
+                plan: { type: string, enum: [FREE, PRO, PROMAX] }
+                durationDays: { type: integer, description: "FREE: 3 or 30; PRO: 7 fixed; PROMAX: 22 fixed" }
+              required: [filename, contentType, contentLength, plan]
+      responses:
+        "200":
+          description: URLs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  uploadUrl: { type: string }
+                  uploadHeaders: { type: object, additionalProperties: true }
+                  downloadUrl: { type: string }
+                  expiresInSeconds: { type: integer }
+        "413": { description: File too large for plan }
+        "429": { description: Quota exceeded }
+        "401": { description: PRO/PM requires auth }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

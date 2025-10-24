@@ -1,0 +1,24 @@
+
+MixtliTransfer Front (We-style) — flows
+
+FREE (con anuncios):
+- Mostrar banner de ads arriba del dropzone.
+- Selector de duración: radio [ 3 días (default) | 30 días ].
+- Validar tamaño <= 3.5 GB.
+- Al presign: plan='FREE', durationDays=3|30.
+- Mostrar badge "gratis • 3.5 GB • 3 o 30 días".
+
+PRO:
+- Requiere login (email o phone OTP).
+- Mostrar: "GB usados en 30d: X / 400 GB". Links ilimitados (hasta agotar GB).
+- Validar tamaño según cap opcional si pones per-file cap; si no, omite.
+- durationDays no editable (7 días fijos).
+
+PROMAX:
+- Requiere login.
+- Mostrar beneficios premium (password, branding si lo agregas, etc.).
+- durationDays fijo = 22 días.
+
+Enlace de descarga:
+- Mostrar caducidad restante (contador) si quieres.
+- Botón "Denunciar / Borrar" si el dueño autenticado abre su propio link.
