@@ -1,32 +1,16 @@
+# MixtliTransfer3000 Backend v2.2.0
+- OTP login (email/phone) ➜ `POST /api/auth/register` y `POST /api/auth/verify-otp`
+- **Upgrade de plan** ➜ `POST /api/plan/upgrade` con `{plan:"PRO"}` o `{plan:"PROMAX"}`
+- **Auto-downgrade** si `plan_expires_at < now()` (se aplica al autenticar)
+- `GET /api/me` para ver `{
+  id, email, plan, plan_expires_at
+}`
 
-# MixtliTransfer3000 Backend Bundle
-Express + Postgres + R2 (Cloudflare) — Planes: FREE / PRO / PROMAX
+### Variables nuevas (opcionales)
+- `PRO_PERIOD_DAYS=30`
+- `PROMAX_PERIOD_DAYS=30`
 
-## Endpoints
-- `POST /api/auth/register`  { email } | { phone }  → OTP (en logs)
-- `POST /api/auth/verify-otp` { email/phone, otp } → { token, user }
-- `GET /api/me` (Bearer JWT)
-- `POST /api/presign` (Bearer JWT)  → { uploadUrl, downloadUrl, expiresInSeconds }
-
-## Env (Render)
-- `DATABASE_URL` (usa la interna de Render)
-- `JWT_SECRET` (tu secreto)
-- R2: `S3_ENDPOINT,S3_BUCKET,S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY,S3_REGION=auto,S3_FORCE_PATH_STYLE=true`
-- `ALLOWED_ORIGINS=["https://TU-NETLIFY.netlify.app","http://localhost:8888"]`
-
-### Planes
-- FREE: 3.5GB por link, 3 o 30 días, máx 10 links / 30d
-- PRO: 400GB / 30d, links ilimitados hasta agotar GB, vida 7d
-- PROMAX: premium, vida 22d
-
-## DB
-Crea tablas:
-```bash
-psql "$DATABASE_URL" -f schema.sql
-```
-
-## Run
-```bash
-npm i
-npm start
-```
+### Ejemplo de flujo PRO
+1) Login OTP → token JWT
+2) `POST /api/plan/upgrade` con Bearer token y body `{"plan":"PRO"}`
+3) Subir con `/api/presign` (ya usa tu `user.plan`)

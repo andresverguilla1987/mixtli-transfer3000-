@@ -1,7 +1,7 @@
 {
   "name": "mixtlitransfer3000-backend",
-  "version": "2.1.2",
-  "description": "MixtliTransfer3000 Backend v2.1.2 \u2014 ESM, auto-migrations (no-FK; UUID/BIGINT safe), packages, TTL, counters, QR page",
+  "version": "2.2.0",
+  "description": "MixtliTransfer3000 Backend v2.2.0 \u2014 no-FK, auth OTP, plan upgrade (PRO/PROMAX) with expiry, auto-downgrade",
   "type": "module",
   "main": "server.js",
   "engines": {
