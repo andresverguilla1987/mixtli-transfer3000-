@@ -1,15 +1,17 @@
 
--- MixtliTransfer3000 schema for plans FREE / PRO / PROMAX
--- Requires pgcrypto or uuid-ossp for gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TYPE plan_t AS ENUM ('FREE','PRO','PROMAX');
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_t') THEN
+    CREATE TYPE plan_t AS ENUM ('FREE','PRO','PROMAX');
+  END IF;
+END$$;
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text UNIQUE,
   phone text UNIQUE,
-  password_hash text, -- optional if using OTP only
+  password_hash text,
   plan plan_t NOT NULL DEFAULT 'FREE',
   plan_started_at timestamptz DEFAULT now(),
   plan_renews_every_days int NOT NULL DEFAULT 30,
@@ -17,7 +19,7 @@ CREATE TABLE users (
   updated_at timestamptz DEFAULT now()
 );
 
-CREATE TABLE links (
+CREATE TABLE IF NOT EXISTS links (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid REFERENCES users(id) ON DELETE SET NULL,
   plan plan_t NOT NULL,
@@ -29,18 +31,7 @@ CREATE TABLE links (
   created_at timestamptz DEFAULT now(),
   active boolean DEFAULT true
 );
-CREATE INDEX links_user_idx ON links(user_id);
-CREATE INDEX links_expires_idx ON links(expires_at);
-CREATE INDEX links_active_idx ON links(active);
 
--- Rolling usage window (30d) materialized via sums at query-time
--- Optional table to cache monthly buckets
-CREATE TABLE usage_buckets (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid REFERENCES users(id) ON DELETE CASCADE,
-  window_start timestamptz NOT NULL,
-  window_end timestamptz NOT NULL,
-  total_bytes bigint NOT NULL DEFAULT 0,
-  total_links int NOT NULL DEFAULT 0,
-  UNIQUE(user_id, window_start, window_end)
-);
+CREATE INDEX IF NOT EXISTS links_user_idx ON links(user_id);
+CREATE INDEX IF NOT EXISTS links_expires_idx ON links(expires_at);
+CREATE INDEX IF NOT EXISTS links_active_idx ON links(active);

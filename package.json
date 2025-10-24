@@ -3,7 +3,9 @@
   "version": "2.0.0",
   "type": "module",
   "main": "server.js",
-  "engines": { "node": ">=18.17" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
     "start": "node server.js"
   },
