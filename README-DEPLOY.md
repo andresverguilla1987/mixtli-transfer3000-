@@ -1,34 +1,35 @@
-# MixtliTransfer3000 Backend FIX
+# MixtliTransfer3000 Backend v2.1 — FULL POWER
+**Build:** 2025-10-24T16:10:41.282653Z
 
-**Fecha:** 2025-10-24T15:55:47.377836Z
+Incluye:
+- ESM puro + auto-migraciones
+- **Packages** (link único para múltiples archivos) con `/api/package/*`
+- Selector de TTL (el backend ya respeta `durationDays`)
+- **Contador de descargas** (por paquete e ítem) vía `/api/dl/:pkg/:itemId`
+- **Página de share** `/dl/:id` con **QR**
 
-Este paquete arregla:
-- Error `require is not defined` (ESM puro)
-- Falta de tablas `users` y `links` (auto-migraciones al arrancar)
-- Respuesta 404 en `/` (agrega un ping básico)
+## ENV
+```
+DATABASE_URL=postgres://...
+S3_ENDPOINT=https://8351c372...r2.cloudflarestorage.com
+S3_BUCKET=mixtlitransfer3000
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+ALLOWED_ORIGINS=["https://<tu-netlify>.netlify.app","http://localhost:8888"]
+IP_SALT=algo-largo
+PUBLIC_BASE_URL=https://<tu-netlify>.netlify.app   # opcional para URLs absolutas en /dl/:id
+FREE_MAX_UPLOAD_MB=3584
+FREE_LINK_TTL_DEFAULT_DAYS=3
+FREE_LINK_TTL_MAX_DAYS=30
+UPLOAD_URL_TTL_SECONDS=3600
+DOWNLOAD_URL_TTL_SECONDS_MAX=86400
+```
 
-## Deploy rápido en Render
+## Rutas nuevas
+- `POST /api/package/create` ⇒ `{ packageId, ttlDays }`
+- `POST /api/package/presign` ⇒ `{ key, uploadUrl }`
+- `GET  /api/package/meta/:id` ⇒ manifest
+- `GET  /api/dl/:pkg/:itemId` ⇒ incrementa contador y redirige al S3 signed URL
+- `GET  /dl/:id` ⇒ página para compartir + QR
 
-1. Crea un nuevo servicio Web (Node).
-2. Sube este proyecto a un repo o copia los archivos.
-3. **Build:** `npm install --no-audit --no-fund`
-4. **Start:** `node --enable-source-maps server.js`
-5. **Node:** 20.x
-
-### Env vars (Render)
-- `DATABASE_URL` (Postgres)
-- `S3_ENDPOINT` = https://8351c372...
-- `S3_BUCKET` = mixtlitransfer3000
-- `S3_ACCESS_KEY_ID` = (R2 token)
-- `S3_SECRET_ACCESS_KEY` = (R2 secret)
-- `ALLOWED_ORIGINS` = ["https://lighthearted-froyo-9dd448.netlify.app","http://localhost:8888"]
-- `IP_SALT` = algo-largo-aleatorio (recomendado)
-- (Opcionales) límites FREE/PRO
-
-## Endpoints
-- `GET /` -> `{ "ok": true }`
-- `GET /api/health`
-- `POST /api/presign`
-
-## Migraciones
-Además de las auto-migraciones, tienes el SQL en `migrations/001_init.sql` por si quieres aplicarlo manualmente en psql.
+> Nota: ZIP “todo en uno” no está en este build (implica streaming zip). Hoy tienes descargas individuales con conteo. Si lo quieres, lo integramos con `archiver` o compresión en worker.
