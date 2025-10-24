@@ -1,4 +1,4 @@
-// MixtliTransfer3000 Backend v2.1.1 — dynamic initDb (UUID/BIGINT-safe)
+// MixtliTransfer3000 Backend v2.1.2 — initDb sin FK (anticolisión UUID/BIGINT)
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
@@ -36,47 +36,34 @@ const {
   PUBLIC_BASE_URL
 } = process.env
 
-if (!SEALED.S3_ENDPOINT || !SEALED.S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
-  console.error('[FATAL] Missing R2 credentials or sealed config'); process.exit(1)
-}
+if (!SEALED.S3_ENDPOINT || !SEALED.S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) { console.error('[FATAL] Missing R2 credentials'); process.exit(1) }
 if (!DATABASE_URL) { console.error('[FATAL] Missing DATABASE_URL'); process.exit(1) }
 
 const MB = 1024*1024
 const pool = new pg.Pool({ connectionString: DATABASE_URL })
-const s3 = new S3Client({
-  region: SEALED.S3_REGION,
-  endpoint: SEALED.S3_ENDPOINT,
-  credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
-  forcePathStyle: !!SEALED.S3_FORCE_PATH_STYLE
-})
+const s3 = new S3Client({ region: SEALED.S3_REGION, endpoint: SEALED.S3_ENDPOINT, credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY }, forcePathStyle: !!SEALED.S3_FORCE_PATH_STYLE })
 
 function num(x){ return Math.max(0, parseInt(String(x||'0'),10) || 0) }
 function clamp(n,a,b){ return Math.max(a, Math.min(b,n)) }
 function extOf(f=''){ const i=f.lastIndexOf('.'); return i>-1? f.slice(i+1).toLowerCase(): '' }
 function clientIp(req){ const xf=req.headers['x-forwarded-for']; const ip=(Array.isArray(xf)?xf[0]:(xf||'')).split(',')[0].trim()||req.ip||'0.0.0.0'; return ip }
-function hashIp(ip, salt = process.env.IP_SALT || process.env.IP_HASH_SECRET || '') {
-  return createHash('sha256').update(String(salt)).update(String(ip)).digest('hex').slice(0, 32)
-}
+function hashIp(ip, salt = process.env.IP_SALT || process.env.IP_HASH_SECRET || '') { return createHash('sha256').update(String(salt)).update(String(ip)).digest('hex').slice(0, 32) }
 
 const FREECFG={ sizeCap:num(FREE_MAX_UPLOAD_MB)*MB, ttlDefaultDays:num(FREE_LINK_TTL_DEFAULT_DAYS), ttlMaxDays:num(FREE_LINK_TTL_MAX_DAYS), maxLinks30d:num(FREE_MAX_LINKS_PER_30D) }
 const PROCFG={ capBytesPerPeriod:num(PRO_MAX_PERIOD_GB)*1024*1024*1024, ttlDays:num(PRO_LINK_TTL_DAYS) }
 const PMCFG={ ttlDays:num(PROMAX_LINK_TTL_DAYS) }
 
-// ---------- dynamic initDb (handles users.id uuid or bigint) ----------
-async function initDb() {
+// ---------- initDb: detectar tipo de users.id y NO crear FKs ----------
+async function initDb(){
   await pool.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`);
   await pool.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
 
-  // does users.id exist?
-  const col = await pool.query(`
-    SELECT data_type
-    FROM information_schema.columns
-    WHERE table_schema='public' AND table_name='users' AND column_name='id'
-    LIMIT 1
+  const q = await pool.query(`
+    SELECT data_type FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='users' AND column_name='id' LIMIT 1
   `);
-  let usersIdType = col.rows[0]?.data_type; // 'uuid' | 'bigint' | undefined
+  let usersIdType = q.rows[0]?.data_type; // 'uuid' | 'bigint' | undefined
 
-  // if users not present => create with uuid
   if (!usersIdType) {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -92,12 +79,7 @@ async function initDb() {
   }
 
   const USER_ID_SQLTYPE = (usersIdType === 'bigint') ? 'BIGINT' : 'UUID';
-  const FK_COMPAT = ( (usersIdType === 'uuid' && USER_ID_SQLTYPE === 'UUID') || (usersIdType === 'bigint' && USER_ID_SQLTYPE === 'BIGINT') );
-  // (just to ensure python syntax doesn't leak; replaced in JS below)
-}
 
-
-  // links
   await pool.query(`
     CREATE TABLE IF NOT EXISTS links (
       id BIGSERIAL PRIMARY KEY,
@@ -114,24 +96,6 @@ async function initDb() {
     );
   `);
 
-  if (${ "true" }) { // will attempt FK, guard with IF NOT EXISTS
-    await pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='links_user_id_fkey') THEN
-          BEGIN
-            ALTER TABLE links ADD CONSTRAINT links_user_id_fkey
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
-          EXCEPTION WHEN others THEN
-            -- ignore if incompatible (e.g., types mismatch)
-            RAISE NOTICE 'FK links->users skipped';
-          END;
-        END IF;
-      END$$;
-    `);
-  }
-
-  // packages
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
       id TEXT PRIMARY KEY,
@@ -146,26 +110,10 @@ async function initDb() {
     );
   `);
 
-  if (${ "true" }) {
-    await pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='packages_user_id_fkey') THEN
-          BEGIN
-            ALTER TABLE packages ADD CONSTRAINT packages_user_id_fkey
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
-          EXCEPTION WHEN others THEN
-            RAISE NOTICE 'FK packages->users skipped';
-          END;
-        END IF;
-      END$$;
-    `);
-  }
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS package_items (
       id BIGSERIAL PRIMARY KEY,
-      package_id TEXT REFERENCES packages(id) ON DELETE CASCADE,
+      package_id TEXT,
       key TEXT NOT NULL,
       filename TEXT NOT NULL,
       content_type TEXT NOT NULL,
@@ -182,27 +130,23 @@ async function initDb() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pkg_created ON packages(created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pkg_items_pkg ON package_items(package_id);`);
 
-  console.log('[DB] schema ready');
+  console.log('[DB] schema ready (no-FK mode, user_id type = ' + USER_ID_SQLTYPE + ')');
 }
 
-// ---------- app + routes (same as v2.1) ----------
+// ---------- app + routes (igual v2.1) ----------
 const app = express()
 app.get('/', (_req,res)=> res.json({ ok:true, name:'MixtliTransfer3000', docs:'/api/health' }))
 app.use(cors({
-  origin: (o, cb) => {
-    if (!o) return cb(null, true)
-    if (SEALED.ALLOWED_ORIGINS.includes(o)) return cb(null, true)
-    cb(new Error('origin_not_allowed'))
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-mixtli-token']
+  origin: (o, cb) => { if(!o) return cb(null,true); if(SEALED.ALLOWED_ORIGINS.includes(o)) return cb(null,true); cb(new Error('origin_not_allowed')); },
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','x-mixtli-token']
 }))
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit:'2mb' }))
 
 app.get('/api/health', (_req,res)=> res.json({ ok:true, service:'mixtlitransfer3000', time:new Date().toISOString() }))
 
-// Auth-lite (otp memory)
-const otpStore = new Map()
+// auth-lite
+const otpStore=new Map()
 function setOtp(key){ const code=String(Math.floor(100000+Math.random()*900000)); const exp=Date.now()+Number(OTP_TTL_MIN)*60*1000; otpStore.set(key,{code,exp}); console.log('[OTP]',key,code) }
 function verifyOtp(key, code){ const row=otpStore.get(key); if(!row) return false; if(Date.now()>row.exp){ otpStore.delete(key); return false } const ok=row.code===String(code); if(ok) otpStore.delete(key); return ok }
 function signToken(user){ return jwt.sign({ uid:user.id, plan:user.plan }, JWT_SECRET, { expiresIn:'30d' }) }
@@ -324,6 +268,5 @@ app.get('/dl/:id', async (req,res)=>{
   }catch(e){ console.error(e); res.status(500).send('page_failed') }
 })
 
-// boot
 await initDb()
-const app2 = app.listen(PORT, ()=> console.log('MixtliTransfer3000 v2.1.1 on :' + PORT))
+app.listen(PORT, ()=> console.log('MixtliTransfer3000 v2.1.2 on :' + PORT))
