@@ -1,7 +1,7 @@
 {
   "name": "mixtlitransfer3000-backend",
-  "version": "2.0.1",
-  "description": "Backend ESM para MixtliTransfer3000 (Express + Presign a Cloudflare R2)",
+  "version": "2.0.2",
+  "description": "Backend ESM para MixtliTransfer3000 (Express + Presign a Cloudflare R2) con auto-migraciones",
   "type": "module",
   "main": "server.js",
   "engines": {

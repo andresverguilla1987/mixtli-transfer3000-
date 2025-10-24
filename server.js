@@ -1,4 +1,4 @@
-// MixtliTransfer3000 — Sealed Server + Anon FREE (ESM fixed)
+// MixtliTransfer3000 — Sealed Server + Anon FREE (ESM fixed + auto-migrations)
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
@@ -9,14 +9,12 @@ import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
 const SEALED = {
-  S3_ENDPOINT: 'https://8351c372dedf0e354a3196aff085f0ae.r2.cloudflarestorage.com',
-  S3_BUCKET: 'mixtlitransfer3000',
-  S3_REGION: 'auto',
-  S3_FORCE_PATH_STYLE: true,
-  ALLOWED_ORIGINS: [
-    'https://lighthearted-froyo-9dd448.netlify.app',
-    'http://localhost:8888'
-  ]
+  S3_ENDPOINT: process.env.S3_ENDPOINT || 'https://8351c372dedf0e354a3196aff085f0ae.r2.cloudflarestorage.com',
+  S3_BUCKET: process.env.S3_BUCKET || 'mixtlitransfer3000',
+  S3_REGION: process.env.S3_REGION || 'auto',
+  S3_FORCE_PATH_STYLE: (process.env.S3_FORCE_PATH_STYLE || 'true') === 'true',
+  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS && JSON.parse(process.env.ALLOWED_ORIGINS))
+    || ['https://lighthearted-froyo-9dd448.netlify.app','http://localhost:8888']
 }
 
 const {
@@ -31,9 +29,7 @@ const {
   FREE_LINK_TTL_MAX_DAYS = '30',
   FREE_MAX_LINKS_PER_30D = '10',
   PRO_MAX_PERIOD_GB = '400',
-  PRO_PERIOD_DAYS = '30',
   PRO_LINK_TTL_DAYS = '7',
-  PROMAX_PERIOD_DAYS = '30',
   PROMAX_LINK_TTL_DAYS = '22',
   UPLOAD_URL_TTL_SECONDS = '3600',
   DOWNLOAD_URL_TTL_SECONDS_MAX = '86400'
@@ -53,7 +49,44 @@ const s3 = new S3Client({
   forcePathStyle: !!SEALED.S3_FORCE_PATH_STYLE
 })
 
+// ---- DB auto migrations ----
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+      email TEXT UNIQUE,
+      phone TEXT UNIQUE,
+      plan  TEXT NOT NULL DEFAULT 'FREE',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS links (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      anon_ip TEXT,
+      plan TEXT NOT NULL,
+      key  TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size_bytes BIGINT NOT NULL DEFAULT 0,
+      expires_at TIMESTAMPTZ NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_links_key_unique ON links(key);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_links_user_created ON links(user_id, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_links_anon_created ON links(anon_ip, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_links_expires ON links(expires_at);`);
+  console.log('[DB] schema ready')
+}
+
 const app = express()
+
+app.get('/', (_req, res) => res.json({ ok: true, name: 'MixtliTransfer3000', docs: '/api/health' }))
+
 app.use(cors({
   origin: (o, cb) => {
     if (!o) return cb(null, true)
@@ -63,10 +96,8 @@ app.use(cors({
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-mixtli-token']
 }))
-app.use(express.json({ limit: '1mb' }))
 
-// best-effort migration
-pool.query(`ALTER TABLE links ADD COLUMN IF NOT EXISTS anon_ip text`).catch(() => {})
+app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_req, res) =>
   res.json({ ok: true, service: 'mixtlitransfer3000', time: new Date().toISOString() })
@@ -105,11 +136,6 @@ async function authOptional(req, _res, next) {
     next()
   }
 }
-async function authRequired(req, res, next) {
-  await authOptional(req, res, () => {})
-  if (!req.user) return res.status(401).json({ error: 'auth_required' })
-  next()
-}
 
 // ---------- auth endpoints ----------
 app.post('/api/auth/register', async (req, res) => {
@@ -125,7 +151,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   const id = (email && String(email).toLowerCase()) || (phone && String(phone)) || ''
   if (!id || !otp) return res.status(400).json({ error: 'need_id_and_otp' })
   if (!verifyOtp(id, otp)) return res.status(400).json({ error: 'otp_invalid' })
-
   const c = await pool.connect()
   try {
     await c.query('BEGIN')
@@ -168,7 +193,6 @@ function clientIp(req) {
   const ip = (Array.isArray(xf) ? xf[0] : (xf || '')).split(',')[0].trim() || req.ip || '0.0.0.0'
   return ip
 }
-// FIX: sin require (ESM). Usa createHash importado arriba
 function hashIp(ip, salt = process.env.IP_SALT || process.env.IP_HASH_SECRET || '') {
   return createHash('sha256').update(String(salt)).update(String(ip)).digest('hex').slice(0, 32)
 }
@@ -223,8 +247,7 @@ app.post('/api/presign', authOptional, async (req, res) => {
         )
         await c.query('COMMIT')
       } catch (e) {
-        await c.query('ROLLBACK')
-        throw e
+        await c.query('ROLLBACK'); throw e
       } finally {
         c.release()
       }
@@ -297,8 +320,7 @@ app.post('/api/presign', authOptional, async (req, res) => {
       )
       await c.query('COMMIT')
     } catch (e) {
-      await c.query('ROLLBACK')
-      throw e
+      await c.query('ROLLBACK'); throw e
     } finally {
       c.release()
     }
@@ -331,4 +353,5 @@ app.post('/api/presign', authOptional, async (req, res) => {
   }
 })
 
+await initDb()
 app.listen(PORT, () => console.log('MixtliTransfer3000 listening on :' + PORT))
