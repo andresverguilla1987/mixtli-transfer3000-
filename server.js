@@ -1,5 +1,9 @@
 
-// MixtliTransfer3000 — Backend (FREE/PRO/PROMAX)
+// MixtliTransfer3000 — Server (PROD sealed non-secrets)
+// - Hardcodes: S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_FORCE_PATH_STYLE, ALLOWED_ORIGINS
+// - Secrets & DB still come from env: S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, DATABASE_URL, JWT_SECRET
+// - Plans: read from env (with sensible defaults)
+
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
@@ -9,20 +13,30 @@ import pg from 'pg'
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
+// ----------- SEALED VALUES (edit here if you change domain/bucket) -----------
+const SEALED = {
+  S3_ENDPOINT: 'https://8351c372dedf0e354a3196aff085f0ae.r2.cloudflarestorage.com',
+  S3_BUCKET: 'mixtlitransfer3000',
+  S3_REGION: 'auto',
+  S3_FORCE_PATH_STYLE: true,
+  ALLOWED_ORIGINS: [
+    'https://lighthearted-froyo-9dd448.netlify.app',
+    'http://localhost:8888'
+  ]
+}
+// -----------------------------------------------------------------------------
+
 const {
   PORT = 10000,
-  NODE_ENV = 'production',
 
-  S3_ENDPOINT, S3_REGION = 'auto', S3_BUCKET,
-  S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_FORCE_PATH_STYLE = 'true',
-
+  // Secrets still come from env
+  S3_ACCESS_KEY_ID,
+  S3_SECRET_ACCESS_KEY,
   DATABASE_URL,
-
   JWT_SECRET = 'change_me',
   OTP_TTL_MIN = '10',
 
-  ALLOWED_ORIGINS = '[]',
-
+  // Plan envs
   FREE_MAX_UPLOAD_MB = '3584',
   FREE_LINK_TTL_DEFAULT_DAYS = '3',
   FREE_LINK_TTL_MAX_DAYS = '30',
@@ -41,39 +55,38 @@ const {
   DOWNLOAD_URL_TTL_SECONDS_MAX = '86400'
 } = process.env
 
-if (!S3_ENDPOINT || !S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
-  console.error('[FATAL] Missing R2 env vars'); process.exit(1)
+if (!SEALED.S3_ENDPOINT || !SEALED.S3_BUCKET || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
+  console.error('[FATAL] Missing R2 credentials or sealed config'); process.exit(1)
 }
 if (!DATABASE_URL) {
   console.error('[FATAL] Missing DATABASE_URL'); process.exit(1)
 }
 
 const MB = 1024*1024
-const allowedOrigins = safeJson(ALLOWED_ORIGINS, [])
 
 const FREE = {
-  sizeCap: num(FREE_MAX_UPLOAD_MB)*MB,
-  ttlDefaultDays: num(FREE_LINK_TTL_DEFAULT_DAYS),
-  ttlMaxDays: num(FREE_LINK_TTL_MAX_DAYS),
-  maxLinks30d: num(FREE_MAX_LINKS_PER_30D)
+  sizeCap: toNum(FREE_MAX_UPLOAD_MB)*MB,
+  ttlDefaultDays: toNum(FREE_LINK_TTL_DEFAULT_DAYS),
+  ttlMaxDays: toNum(FREE_LINK_TTL_MAX_DAYS),
+  maxLinks30d: toNum(FREE_MAX_LINKS_PER_30D)
 }
 const PRO = {
-  periodDays: num(PRO_PERIOD_DAYS),
-  capBytesPerPeriod: num(PRO_MAX_PERIOD_GB)*1024*1024*1024,
-  ttlDays: num(PRO_LINK_TTL_DAYS),
-  sizeCap: PRO_MAX_UPLOAD_MB ? num(PRO_MAX_UPLOAD_MB)*MB : Infinity
+  periodDays: toNum(PRO_PERIOD_DAYS),
+  capBytesPerPeriod: toNum(PRO_MAX_PERIOD_GB)*1024*1024*1024,
+  ttlDays: toNum(PRO_LINK_TTL_DAYS),
+  sizeCap: PRO_MAX_UPLOAD_MB ? toNum(PRO_MAX_UPLOAD_MB)*MB : Infinity
 }
 const PROMAX = {
-  periodDays: num(PROMAX_PERIOD_DAYS),
-  ttlDays: num(PROMAX_LINK_TTL_DAYS),
-  sizeCap: PROMAX_MAX_UPLOAD_MB ? num(PROMAX_MAX_UPLOAD_MB)*MB : Infinity
+  periodDays: toNum(PROMAX_PERIOD_DAYS),
+  ttlDays: toNum(PROMAX_LINK_TTL_DAYS),
+  sizeCap: PROMAX_MAX_UPLOAD_MB ? toNum(PROMAX_MAX_UPLOAD_MB)*MB : Infinity
 }
 
 const s3 = new S3Client({
-  region: S3_REGION,
-  endpoint: S3_ENDPOINT,
+  region: SEALED.S3_REGION,
+  endpoint: SEALED.S3_ENDPOINT,
   credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
-  forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true',
+  forcePathStyle: !!SEALED.S3_FORCE_PATH_STYLE
 })
 
 const pool = new pg.Pool({ connectionString: DATABASE_URL })
@@ -82,7 +95,7 @@ const app = express()
 app.use(cors({
   origin: (origin, cb)=>{
     if (!origin) return cb(null, true)
-    if (allowedOrigins.includes(origin)) return cb(null, true)
+    if (SEALED.ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
     cb(new Error('origin_not_allowed'))
   },
   methods: ['GET','POST','OPTIONS'],
@@ -98,7 +111,7 @@ app.get('/api/health', (_req,res)=>{
 const otpStore = new Map()
 function setOtp(key){
   const code = String(Math.floor(100000 + Math.random()*900000))
-  const exp = Date.now() + num(OTP_TTL_MIN)*60*1000
+  const exp = Date.now() + toNum(OTP_TTL_MIN)*60*1000
   otpStore.set(key, { code, exp })
   console.log('[OTP]', key, code) // replace with email/SMS in prod
 }
@@ -127,8 +140,7 @@ async function authRequired(req,res,next){
 }
 
 // ===== HELPERS =====
-function num(x){ return Math.max(0, parseInt(String(x||'0'),10) || 0) }
-function safeJson(s,f){ try{ return JSON.parse(s) }catch{ return f } }
+function toNum(x){ return Math.max(0, parseInt(String(x||'0'),10) || 0) }
 function extOf(filename=''){ const i=filename.lastIndexOf('.'); return i>-1? filename.slice(i+1).toLowerCase(): '' }
 function clamp(n,a,b){ return Math.max(a, Math.min(b,n)) }
 
@@ -188,8 +200,8 @@ app.get('/api/me', authRequired, async (req,res)=>{
      FROM links WHERE user_id=$1 ORDER BY created_at DESC LIMIT 15`, [user.id]
   )
   const items = await Promise.all(links.map(async l=>{
-    const getCmd = new GetObjectCommand({ Bucket:S3_BUCKET, Key:l.key, ResponseContentDisposition:`attachment; filename="${l.filename||'file'}"` })
-    const downloadUrl = await getSignedUrl(s3, getCmd, { expiresIn: num(DOWNLOAD_URL_TTL_SECONDS_MAX) })
+    const getCmd = new GetObjectCommand({ Bucket:SEALED.S3_BUCKET, Key:l.key, ResponseContentDisposition:`attachment; filename="${l.filename||'file'}"` })
+    const downloadUrl = await getSignedUrl(s3, getCmd, { expiresIn: toNum(DOWNLOAD_URL_TTL_SECONDS_MAX) })
     return { ...l, downloadUrl }
   }))
   res.json({ user, usage, links: items })
@@ -198,7 +210,7 @@ app.get('/api/me', authRequired, async (req,res)=>{
 // ===== PLAN LIMITS =====
 function planLimits(plan, durationDays){
   if(plan==='FREE'){
-    const ttl = clamp(num(durationDays || FREE.ttlDefaultDays), FREE.ttlDefaultDays, FREE.ttlMaxDays)
+    const ttl = clamp(toNum(durationDays || FREE.ttlDefaultDays), FREE.ttlDefaultDays, FREE.ttlMaxDays)
     return { sizeCap: FREE.sizeCap, ttlDays: ttl, periodDays: 30, capBytesPerPeriod: 0, maxLinks30d: FREE.maxLinks30d }
   }
   if(plan==='PRO'){
@@ -248,10 +260,10 @@ app.post('/api/presign', authRequired, async (req,res)=>{
       await client.query('COMMIT')
     }catch(e){ await client.query('ROLLBACK'); throw e } finally { client.release() }
 
-    const putCmd = new PutObjectCommand({ Bucket:S3_BUCKET, Key:key, ContentType:contentType, Metadata:{ 'x-plan': plan, 'x-origin':'mixtli' } })
-    const uploadUrl = await getSignedUrl(s3, putCmd, { expiresIn: num(UPLOAD_URL_TTL_SECONDS) })
-    const getCmd = new GetObjectCommand({ Bucket:S3_BUCKET, Key:key, ResponseContentDisposition:`attachment; filename="${filename}"` })
-    const downloadUrl = await getSignedUrl(s3, getCmd, { expiresIn: num(DOWNLOAD_URL_TTL_SECONDS_MAX) })
+    const putCmd = new PutObjectCommand({ Bucket:SEALED.S3_BUCKET, Key:key, ContentType:contentType, Metadata:{ 'x-plan': plan, 'x-origin':'mixtli' } })
+    const uploadUrl = await getSignedUrl(s3, putCmd, { expiresIn: toNum(UPLOAD_URL_TTL_SECONDS) })
+    const getCmd = new GetObjectCommand({ Bucket:SEALED.S3_BUCKET, Key:key, ResponseContentDisposition:`attachment; filename="${filename}"` })
+    const downloadUrl = await getSignedUrl(s3, getCmd, { expiresIn: toNum(DOWNLOAD_URL_TTL_SECONDS_MAX) })
 
     res.json({ key, uploadUrl, uploadHeaders:{ 'Content-Type': contentType }, downloadUrl, expiresInSeconds: lim.ttlDays*24*3600 })
   }catch(e){ console.error(e); res.status(500).json({ error:'presign_failed', detail:String(e) }) }
@@ -260,4 +272,3 @@ app.post('/api/presign', authRequired, async (req,res)=>{
 app.get('/', (_req,res)=>res.send('MixtliTransfer3000 API OK'))
 
 app.listen(PORT, ()=> console.log('MixtliTransfer3000 listening on :'+PORT))
-
