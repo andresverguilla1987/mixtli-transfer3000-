@@ -1,22 +1,12 @@
 {
-  "name": "mixtli-transfer3000",
-  "version": "2.4.2",
-  "description": "Mixtli Transfer 3000 \u2014 Backend Render + Cloudflare R2 + Netlify (All-in-One)",
-  "main": "server.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node server.js"
-  },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.684.0",
-    "@aws-sdk/s3-request-presigner": "^3.684.0",
+    "@aws-sdk/client-s3": "^3.637.0",
+    "@aws-sdk/s3-request-presigner": "^3.637.0",
+    "pg": "^8.11.5",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^4.21.1",
+    "express": "^4.19.2",
     "morgan": "^1.10.0",
-    "uuid": "^9.0.1"
-  },
-  "engines": {
-    "node": ">=18.x"
+    "uuid": "^9.0.1",
+    "dotenv": "^16.4.5"
   }
 }
