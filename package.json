@@ -1,7 +1,6 @@
 {
   "name": "mixtlitransfer3000-backend",
-  "version": "2.2.0",
-  "description": "MixtliTransfer3000 Backend v2.2.0 \u2014 no-FK, auth OTP, plan upgrade (PRO/PROMAX) with expiry, auto-downgrade",
+  "version": "2.2.2",
   "type": "module",
   "main": "server.js",
   "engines": {
@@ -18,6 +17,5 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0"
-  },
-  "private": true
+  }
 }
