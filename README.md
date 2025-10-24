@@ -1,18 +1,29 @@
-Mixtli Transfer 3000 — Backend v2.4.2 (All-in-One)
-=====================================================
-- server.js (SDK v3 + selftest)
-- package.json
-- .env.example
+# MixtliTransfer3000 — Backend (Transfer Puro)
 
-Render:
-- Build:  npm install --no-audit --no-fund
-- Start:  node server.js
+**Stack:** Node.js (Express) + AWS SDK v3 (S3-compatible, Cloudflare R2).  
+**DB-less:** No database; download links are signed GET URLs that expire after `LINK_TTL_HOURS`.
 
-Pruebas:
-- GET /api/health
-- GET /api/debug-cred
-- GET /api/selftest   ← diagnostica credenciales/permiso/escritura
+## Endpoints
+- `GET /api/health` → quick check
+- `POST /api/presign` → body: `{ filename, contentType, contentLength }` → returns `{ key, uploadUrl, uploadHeaders, downloadUrl, expiresInSeconds }`
 
-Notas:
-- R2 usa SigV4 y path-style (ya configurado).
-- GET presign 24h máx recomendado.
+## Deploy (Render)
+1. Create a new **Web Service** → Node 18+.
+2. Build command:  
+   ```
+   npm install --omit=dev --no-audit --no-fund
+   ```
+3. Start command:  
+   ```
+   node server.js
+   ```
+4. Set env vars as in `.env.example`.
+5. Open `https://<your-service>.onrender.com/api/health`.
+
+## CORS
+Set `ALLOWED_ORIGINS` to a JSON array containing your Netlify origin(s).
+
+## Notes
+- Upload URL expires in 1 hour (enough to PUT large files).
+- Download URL expires after `LINK_TTL_HOURS` (default 72h).
+- `MAX_UPLOAD_MB` is a policy check; uploads go direct to R2.
