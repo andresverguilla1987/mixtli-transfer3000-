@@ -1,4 +1,5 @@
-// Mixtli Transfer 3000 — Frontend v2.4.1
+// Mixtli Transfer 3000 — Frontend v3.0 FIX (compatible v2.5.0 backend)
+
 const els = {
   backendUrl: document.getElementById('backendUrl'),
   expires: document.getElementById('expires'),
@@ -11,9 +12,10 @@ const els = {
   totalBar: document.getElementById('totalBar'),
   totalPct: document.getElementById('totalPct'),
   btnHealth: document.getElementById('btnHealth'),
+  pw: document.getElementById('pw'),
+  pwHint: document.getElementById('pwHint'),
 };
 
-// Guarda y recupera backend URL en localStorage
 const LS_KEY = 'mixtli_backend_url';
 els.backendUrl.value = localStorage.getItem(LS_KEY) || '';
 els.backendUrl.addEventListener('change', () => localStorage.setItem(LS_KEY, els.backendUrl.value.trim()));
@@ -43,8 +45,7 @@ function render(){
           <div class="progress"><div class="bar" style="width:${it.pct||0}%"></div></div>
         </div>
         <div class="btns">
-          ${it.links?.getUrl ? `<a class="link-btn" href="${it.links.getUrl}" target="_blank" rel="noopener">Descargar (24h)</a>` : ''}
-          ${it.links?.objectUrl ? `<a class="link-btn" href="${it.links.objectUrl}" target="_blank" rel="noopener">Objeto</a>` : ''}
+          ${it.links?.publicUrl ? `<a class="link-btn" href="${it.links.publicUrl}" target="_blank" rel="noopener">Link público</a>` : ''}
         </div>
       </div>
     `;
@@ -76,20 +77,25 @@ els.dropzone.addEventListener('drop', e => addFiles(e.dataTransfer.files));
 
 els.btnClear.addEventListener('click', ()=>{ items = []; render(); });
 
-// Presign
-async function presign(backendUrl, files, expires){
+// Presign REAL compatible con backend v2.5.0
+async function presignOne(backendUrl, file, days, password, hint){
   const body = {
-    files: files.map(f => ({ name: f.name, size: f.size, type: f.type })),
-    expiresSeconds: expires
+    filename: file.name,
+    contentType: file.type,
+    contentLength: file.size,
+    durationDays: days,
+    linkPassword: password || undefined,
+    linkPasswordHint: hint || undefined
   };
+
   const resp = await fetch(new URL('/api/presign', backendUrl), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+
   if(!resp.ok){
-    const text = await resp.text().catch(()=>'');
-    throw new Error(`presign ${resp.status}: ${text}`);
+    throw new Error(`presign ${resp.status}: ${await resp.text().catch(()=> '')}`);
   }
   return await resp.json();
 }
@@ -122,20 +128,27 @@ els.btnUpload.addEventListener('click', async ()=>{
     const files = items.map(i => i.file);
     if(files.length === 0) return alert('Agrega archivos');
 
-    items.forEach(i => { i.state = 'firmando…'; i.pct = 0; });
-    render();
+    const days = Number(els.expires.value || 3);
+    const password = els.pw.value.trim() || null;
+    const hint = els.pwHint.value.trim() || null;
 
-    const { ok, results, error } = await presign(backend, files, Number(els.expires.value||3600));
-    if(!ok) throw new Error(error || 'fallo presign');
-
-    // Subir en el mismo orden
-    for(let i=0;i<items.length;i++){
+    // Paso 1: obtener presign por archivo
+    for(let i = 0; i < items.length; i++){
       const it = items[i];
-      const pres = results[i];
-      it.state = 'subiendo…'; it.pct = 0; render();
-      await putWithProgress(pres.putUrl, it.file, pct => { it.pct = pct; render(); });
-      it.state = 'ok'; it.pct = 100; it.links = { getUrl: pres.getUrl, objectUrl: pres.objectUrl };
-      render();
+      it.state = 'firmando…'; it.pct = 0; render();
+
+      const j = await presignOne(backend, it.file, days, password, hint);
+
+      it.links = {
+        uploadUrl: j.uploadUrl,
+        publicUrl: backend + j.publicUrl
+      };
+      it.state = 'subiendo…'; render();
+
+      // Paso 2: subir
+      await putWithProgress(j.uploadUrl, it.file, pct => { it.pct = pct; render(); });
+
+      it.state = 'ok'; it.pct = 100; render();
     }
   }catch(err){
     console.error(err);
