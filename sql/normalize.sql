@@ -1,20 +1,3 @@
-// Mixtli DB Fix Server (auto-normalize links table)
-// Minimal Express just to run DB init and respond health.
-import 'dotenv/config'
-import express from 'express'
-import pg from 'pg'
-
-const { DATABASE_URL, PORT = 10000 } = process.env
-
-if (!DATABASE_URL) {
-  console.error('[FATAL] Missing DATABASE_URL')
-  process.exit(1)
-}
-
-const pool = new pg.Pool({ connectionString: DATABASE_URL })
-
-async function normalizeDb() {
-  const sql = `
 DO $$
 BEGIN
   IF to_regclass('public.links') IS NULL AND to_regclass('public.enlaces') IS NOT NULL THEN
@@ -51,18 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_links_user_created ON public.links(user_id, creat
 CREATE INDEX IF NOT EXISTS idx_links_anon_created ON public.links(anon_ip, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_links_expires ON public.links(expires_at);
 
+-- Slug para filas antiguas
 UPDATE public.links
 SET slug = 'L' || replace(gen_random_uuid()::text, '-', '')
 WHERE slug IS NULL;
-`;
-  await pool.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`)
-  await pool.query(sql)
-  console.log('[DB-NORMALIZE] done')
-}
-
-const app = express()
-app.get('/api/health', (_req,res)=> res.json({ ok:true, time:new Date().toISOString() }))
-
-await normalizeDb()
-
-app.listen(PORT, ()=> console.log('DB Fix server on :' + PORT))
