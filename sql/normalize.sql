@@ -1,3 +1,4 @@
+-- sql/normalize.sql
 DO $$
 BEGIN
   IF to_regclass('public.links') IS NULL AND to_regclass('public.enlaces') IS NOT NULL THEN
@@ -5,9 +6,7 @@ BEGIN
   END IF;
 END$$;
 
-CREATE TABLE IF NOT EXISTS public.links (
-  id BIGSERIAL PRIMARY KEY
-);
+CREATE TABLE IF NOT EXISTS public.links ( id BIGSERIAL PRIMARY KEY );
 
 ALTER TABLE public.links
   ADD COLUMN IF NOT EXISTS slug            TEXT,
@@ -33,8 +32,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_links_slug_unique ON public.links(slug);
 CREATE INDEX IF NOT EXISTS idx_links_user_created ON public.links(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_links_anon_created ON public.links(anon_ip, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_links_expires ON public.links(expires_at);
-
--- Slug para filas antiguas
-UPDATE public.links
-SET slug = 'L' || replace(gen_random_uuid()::text, '-', '')
-WHERE slug IS NULL;
