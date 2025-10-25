@@ -1,22 +1,15 @@
 {
-  "name": "mixtli-transfer3000",
+  "name": "mixtli-backend",
   "version": "2.5.1",
   "type": "module",
   "main": "server.js",
-  "engines": {
-    "node": ">=20 <23"
-  },
-  "scripts": {
-    "start": "node --enable-source-maps server.js"
-  },
+  "scripts": { "start": "node --enable-source-maps server.js" },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.618.0",
-    "@aws-sdk/s3-request-presigner": "^3.618.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^6.9.13",
-    "pg": "^8.11.5"
+    "pg": "^8.12.0"
   }
 }
