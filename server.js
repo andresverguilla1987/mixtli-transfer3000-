@@ -1,16 +1,23 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.6 con CORS + Email + SMS/WhatsApp
+// Mixtli Transfer – Backend (OTP + Health) v2.6
+// CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio)
+// Node 18+ recomendado (trae fetch). Si no, activamos fallback.
+
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import jwt from 'jsonwebtoken'
 import pg from 'pg'
 import nodemailer from 'nodemailer'
-import twilio from 'twilio' // <— para SMS/WhatsApp (opcional)
+import twilio from 'twilio'
 
-const num = (x) => Math.max(0, parseInt(String(x ?? '0'), 10) || 0)
+// --- Fallback de fetch para runtimes viejos ---
+if (!globalThis.fetch) {
+  const { default: nodeFetch } = await import('node-fetch')
+  globalThis.fetch = nodeFetch
+}
 
 const {
-  PORT = process.env.PORT || 10000,
+  PORT = 10000,
   DATABASE_URL,
   JWT_SECRET = 'change_me',
   OTP_TTL_MIN = '10',
@@ -30,13 +37,18 @@ const {
   // Twilio
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM,
-  TWILIO_WHATSAPP_FROM
+  TWILIO_FROM,              // ej: +12025550123  (para SMS)
+  TWILIO_WHATSAPP_FROM,     // ej: whatsapp:+14155238886 (sandbox) ó whatsapp:+<tu-num-BAA>
+  TWILIO_PREFER_WHATSAPP = '0' // "1" => si envías phone normal, lo manda por WhatsApp
 } = process.env
 
 if (!DATABASE_URL) { console.error('[FATAL] Missing DATABASE_URL'); process.exit(1) }
 
-const pool = new pg.Pool({ connectionString: DATABASE_URL })
+// Render/Postgres requiere SSL. Esto evita errores tipo "self signed cert".
+const pool = new pg.Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+})
 
 // ---------------- DB bootstrap ----------------
 async function initDb() {
@@ -81,10 +93,15 @@ async function initDb() {
 }
 
 // ---------------- OTP helpers ----------------
+function rand6() {
+  return String(Math.floor(100000 + Math.random() * 900000))
+}
+
 async function createOtp(key, ttlMin) {
-  const code = String(Math.floor(100000 + Math.random() * 900000))
+  const code = rand6()
   await pool.query(
-    `INSERT INTO otps (key, code, exp) VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`,
+    `INSERT INTO otps (key, code, exp)
+     VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`,
     [key, code, ttlMin]
   )
   return code
@@ -158,26 +175,28 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 function normalizePhone(p) {
   if (!p) return ''
   return String(p).replace(/\s+/g, '')
-  // Para producción pro, usa libphonenumber-js
 }
 
+// Decide canal y manda
 async function sendSmsOrWhatsapp(rawTo, text) {
-  const hasTwilio = !!twilioClient
-  const to = normalizePhone(rawTo)
+  const toRaw = normalizePhone(rawTo)
 
-  if (!hasTwilio) {
-    console.log('[SMS:demo]', to, text)
-    return
+  if (!twilioClient) { console.log('[SMS:demo]', toRaw, text); return }
+
+  // Canal:
+  // 1) Si ya viene "whatsapp:+52..." => WhatsApp
+  // 2) Si TWILIO_PREFER_WHATSAPP=1 y tenemos TWILIO_WHATSAPP_FROM => convertimos "+52..." a "whatsapp:+52..."
+  // 3) En otro caso => SMS
+  let to = toRaw
+  let from = TWILIO_FROM
+
+  const looksWhatsApp = toRaw.startsWith('whatsapp:')
+  if (looksWhatsApp || (TWILIO_PREFER_WHATSAPP === '1' && TWILIO_WHATSAPP_FROM)) {
+    if (!looksWhatsApp && toRaw.startsWith('+')) to = `whatsapp:${toRaw}`
+    from = TWILIO_WHATSAPP_FROM
   }
 
-  // WhatsApp: si comienza por "whatsapp:" o si configuraste TWILIO_WHATSAPP_FROM
-  const isWhatsApp = String(to).startsWith('whatsapp:')
-  const from = isWhatsApp ? TWILIO_WHATSAPP_FROM : TWILIO_FROM
-
-  if (!from) {
-    console.warn('[SMS] Falta TWILIO_FROM o TWILIO_WHATSAPP_FROM')
-    return
-  }
+  if (!from) { console.warn('[SMS] Falta TWILIO_FROM/TWILIO_WHATSAPP_FROM'); return }
 
   try {
     await twilioClient.messages.create({ to, from, body: text })
@@ -227,8 +246,10 @@ app.post('/api/auth/register', async (req, res) => {
         'Tu código Mixtli',
         `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`
       )
-    } else if (phone) {
-      // SMS (E.164: +52155...) o WhatsApp si ya viene "whatsapp:+52..."
+    } else {
+      // SMS (E.164: +52...) o WhatsApp:
+      // - Si el front te manda 'whatsapp:+52...' lo respeta
+      // - Si pusiste TWILIO_PREFER_WHATSAPP=1, lo convierte a WhatsApp automáticamente
       await sendSmsOrWhatsapp(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
     }
 
@@ -246,7 +267,7 @@ app.post('/api/auth/verify', (req, _res, next) => {
   next()
 })
 
-// Verificar OTP y hacer upsert de usuario
+// Verificar OTP y upsert usuario
 app.post('/api/auth/verify-otp', async (req, res) => {
   try {
     console.log('[VERIFY-OTP] body:', req.body)
@@ -261,18 +282,18 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     if (email) {
       const r = await pool.query(
         `INSERT INTO users (email, plan)
-         VALUES ($1, 'FREE')
-         ON CONFLICT (email) DO UPDATE SET updated_at = now()
-         RETURNING id, email, phone, plan, plan_expires_at`,
+         VALUES ($1,'FREE')
+         ON CONFLICT (email) DO UPDATE SET updated_at=now()
+         RETURNING id,email,phone,plan,plan_expires_at`,
         [email.toLowerCase()]
       )
       row = r.rows[0]
     } else {
       const r = await pool.query(
         `INSERT INTO users (phone, plan)
-         VALUES ($1, 'FREE')
-         ON CONFLICT (phone) DO UPDATE SET updated_at = now()
-         RETURNING id, email, phone, plan, plan_expires_at`,
+         VALUES ($1,'FREE')
+         ON CONFLICT (phone) DO UPDATE SET updated_at=now()
+         RETURNING id,email,phone,plan,plan_expires_at`,
         [phone]
       )
       row = r.rows[0]
