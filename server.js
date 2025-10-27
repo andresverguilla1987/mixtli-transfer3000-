@@ -1,5 +1,5 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.6
-// CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio)
+// Mixtli Transfer – Backend (OTP + Health) v2.7
+// CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio) + RateLimit + Purga OTP
 // Node 18+ recomendado (trae fetch). Si no, activamos fallback.
 
 import 'dotenv/config'
@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken'
 import pg from 'pg'
 import nodemailer from 'nodemailer'
 import twilio from 'twilio'
+import rateLimit from 'express-rate-limit'
 
 // --- Fallback de fetch para runtimes viejos ---
 if (!globalThis.fetch) {
@@ -32,7 +33,7 @@ const {
   SMTP_FROM,
 
   // CORS
-  ALLOWED_ORIGINS = '["http://localhost:8888","https://lighthearted-froyo-9dd448.netlify.app"]',
+  ALLOWED_ORIGINS = '["http://localhost:8888","http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","https://lighthearted-froyo-9dd448.netlify.app"]',
 
   // Twilio
   TWILIO_ACCOUNT_SID,
@@ -52,8 +53,12 @@ const pool = new pg.Pool({
 
 // ---------------- DB bootstrap ----------------
 async function initDb() {
-  await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
-  await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
+  // Intentar extensiones, pero no fallar si no hay permisos
+  try { await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";') }
+  catch (e) { console.warn('[DB] pgcrypto ext no disponible:', e?.message || e) }
+
+  try { await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";') }
+  catch (e) { console.warn('[DB] uuid-ossp ext no disponible:', e?.message || e) }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -124,6 +129,13 @@ function signToken(user) {
   return jwt.sign({ uid: user.id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' })
 }
 
+// Purga periódica de OTPs vencidos
+async function purgeOtps() {
+  try { await pool.query('DELETE FROM otps WHERE exp < now()') }
+  catch (e) { console.warn('[OTP purge] error:', e?.message || e) }
+}
+setInterval(purgeOtps, 10 * 60 * 1000) // cada 10 minutos
+
 // ---------------- Mail (SendGrid/SMTP) ----------------
 let smtpTransport = null
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
@@ -174,7 +186,8 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 function normalizePhone(p) {
   if (!p) return ''
-  return String(p).replace(/\s+/g, '')
+  // Quita espacios, guiones, paréntesis
+  return String(p).replace(/[\s\-\(\)]/g, '')
 }
 
 // Decide canal y manda
@@ -183,10 +196,6 @@ async function sendSmsOrWhatsapp(rawTo, text) {
 
   if (!twilioClient) { console.log('[SMS:demo]', toRaw, text); return }
 
-  // Canal:
-  // 1) Si ya viene "whatsapp:+52..." => WhatsApp
-  // 2) Si TWILIO_PREFER_WHATSAPP=1 y tenemos TWILIO_WHATSAPP_FROM => convertimos "+52..." a "whatsapp:+52..."
-  // 3) En otro caso => SMS
   let to = toRaw
   let from = TWILIO_FROM
 
@@ -211,14 +220,22 @@ const app = express()
 let ORIGINS = []
 try { ORIGINS = JSON.parse(ALLOWED_ORIGINS) } catch { ORIGINS = [] }
 
+// helper para previews de Netlify (*.netlify.app)
+function isNetlifyPreview(origin) {
+  try {
+    const h = new URL(origin).hostname
+    return /\.netlify\.app$/i.test(h)
+  } catch { return false }
+}
+
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true) // Postman / curl
-    if (ORIGINS.includes(o)) return cb(null, true)
+    if (!o) return cb(null, true) // Postman / curl / SSR
+    if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
-  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'x-cron-token'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'x-cron-token', 'x-mixtli-token'],
   optionsSuccessStatus: 204
 })
 app.use(corsMw)
@@ -227,12 +244,20 @@ app.options('*', corsMw)
 app.set('trust proxy', true)
 app.use(express.json({ limit: '2mb' }))
 
+// ---------------- Rate-limit OTP ----------------
+const otpLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 min
+  max: 8,                  // 8 intentos por IP en la ventana
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
 // ---------------- Routes ----------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }))
 
 // Enviar OTP (email o phone)
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', otpLimiter, async (req, res) => {
   try {
     const { email, phone } = req.body || {}
     const id = (email && String(email).toLowerCase()) || (phone && String(phone)) || ''
@@ -247,9 +272,7 @@ app.post('/api/auth/register', async (req, res) => {
         `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`
       )
     } else {
-      // SMS (E.164: +52...) o WhatsApp:
-      // - Si el front te manda 'whatsapp:+52...' lo respeta
-      // - Si pusiste TWILIO_PREFER_WHATSAPP=1, lo convierte a WhatsApp automáticamente
+      // SMS (E.164: +52...) o WhatsApp
       await sendSmsOrWhatsapp(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
     }
 
@@ -307,6 +330,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 })
 
+// Error handler
 app.use((err, _req, res, _next) => {
   console.error('[ERR]', err?.message || err)
   res.status(500).json({ error: 'internal_error', detail: String(err?.message || err) })
