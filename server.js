@@ -1,4 +1,4 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.7
+// Mixtli Transfer – Backend (OTP + Health) v2.8
 // CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio) + RateLimit + Purga OTP
 // Node 18+ recomendado (trae fetch). Si no, activamos fallback.
 
@@ -38,14 +38,14 @@ const {
   // Twilio
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM,              // ej: +12025550123  (para SMS)
-  TWILIO_WHATSAPP_FROM,     // ej: whatsapp:+14155238886 (sandbox) ó whatsapp:+<tu-num-BAA>
-  TWILIO_PREFER_WHATSAPP = '0' // "1" => si envías phone normal, lo manda por WhatsApp
+  TWILIO_FROM,              // ej: +12025550123 (SMS)
+  TWILIO_WHATSAPP_FROM,     // ej: whatsapp:+14155238886 (sandbox) o whatsapp:+<tu-num-BAA>
+  TWILIO_PREFER_WHATSAPP = '0'
 } = process.env
 
 if (!DATABASE_URL) { console.error('[FATAL] Missing DATABASE_URL'); process.exit(1) }
 
-// Render/Postgres requiere SSL. Esto evita errores tipo "self signed cert".
+// Render/Postgres requiere SSL (evita self-signed).
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -53,7 +53,6 @@ const pool = new pg.Pool({
 
 // ---------------- DB bootstrap ----------------
 async function initDb() {
-  // Intentar extensiones, pero no fallar si no hay permisos
   try { await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";') }
   catch (e) { console.warn('[DB] pgcrypto ext no disponible:', e?.message || e) }
 
@@ -82,7 +81,6 @@ async function initDb() {
     );
   `)
 
-  // Índices únicos parciales (permiten NULL)
   await pool.query(`
   DO $$
   BEGIN
@@ -186,7 +184,7 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 function normalizePhone(p) {
   if (!p) return ''
-  // Quita espacios, guiones, paréntesis
+  // quita espacios, guiones y paréntesis
   return String(p).replace(/[\s\-\(\)]/g, '')
 }
 
@@ -207,8 +205,12 @@ async function sendSmsOrWhatsapp(rawTo, text) {
 
   if (!from) { console.warn('[SMS] Falta TWILIO_FROM/TWILIO_WHATSAPP_FROM'); return }
 
+  // LOG de depuración para confirmar canal
+  console.log('[WA/SMS] to=', to, 'from=', from, 'preferWA=', TWILIO_PREFER_WHATSAPP)
+
   try {
-    await twilioClient.messages.create({ to, from, body: text })
+    const msg = await twilioClient.messages.create({ to, from, body: text })
+    console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
   } catch (e) {
     console.warn('[SMS] fallo', e?.message || e)
   }
@@ -241,15 +243,18 @@ const corsMw = cors({
 app.use(corsMw)
 app.options('*', corsMw)
 
-app.set('trust proxy', true)
+// 👇 Fix para express-rate-limit v7 en Render (1 proxy delante)
+app.set('trust proxy', 1)
 app.use(express.json({ limit: '2mb' }))
 
 // ---------------- Rate-limit OTP ----------------
 const otpLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 min
-  max: 8,                  // 8 intentos por IP en la ventana
+  max: 8,                  // 8 intentos por IP
   standardHeaders: true,
   legacyHeaders: false,
+  // no contar preflight
+  skip: (req) => req.method === 'OPTIONS',
 })
 
 // ---------------- Routes ----------------
@@ -272,7 +277,6 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
         `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`
       )
     } else {
-      // SMS (E.164: +52...) o WhatsApp
       await sendSmsOrWhatsapp(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
     }
 
