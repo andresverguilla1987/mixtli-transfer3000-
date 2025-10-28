@@ -1,5 +1,5 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.8
-// CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio) + RateLimit + Purga OTP
+// Mixtli Transfer – Backend (OTP + Health) v2.9
+// CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio) + RateLimit + Purga OTP + Debug
 // Node 18+ recomendado (trae fetch). Si no, activamos fallback.
 
 import 'dotenv/config'
@@ -212,7 +212,9 @@ async function sendSmsOrWhatsapp(rawTo, text) {
     const msg = await twilioClient.messages.create({ to, from, body: text })
     console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
   } catch (e) {
-    console.warn('[SMS] fallo', e?.message || e)
+    const code = e?.code || e?.status || ''
+    const msg = e?.message || String(e)
+    console.warn('[Twilio ERROR]', code, msg)
   }
 }
 
@@ -240,10 +242,15 @@ const corsMw = cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'x-cron-token', 'x-mixtli-token'],
   optionsSuccessStatus: 204
 })
-app.use(corsMw)
+app.use((req, res, next) => corsMw(req, res, (err) => {
+  if (err?.message === 'origin_not_allowed') {
+    return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
+  }
+  next()
+}))
 app.options('*', corsMw)
 
-// 👇 Fix para express-rate-limit v7 en Render (1 proxy delante)
+// Fix para express-rate-limit v7 en Render (1 proxy delante)
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '2mb' }))
 
@@ -259,20 +266,22 @@ const otpLimiter = rateLimit({
 
 // ---------------- Routes ----------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }))
+app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.9' }))
 
 // Enviar OTP (email o phone)
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
   try {
-    const { email, phone } = req.body || {}
-    const id = (email && String(email).toLowerCase()) || (phone && String(phone)) || ''
+    let { email, phone } = req.body || {}
+    email = email ? String(email).trim().toLowerCase() : ''
+    phone = phone ? String(phone).trim() : ''
+    const id = email || phone
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
 
     const code = await createOtp(id, OTP_TTL_MIN)
 
     if (email) {
       await sendMail(
-        id,
+        email,
         'Tu código Mixtli',
         `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`
       )
@@ -298,8 +307,10 @@ app.post('/api/auth/verify', (req, _res, next) => {
 app.post('/api/auth/verify-otp', async (req, res) => {
   try {
     console.log('[VERIFY-OTP] body:', req.body)
-    const { email, phone, otp } = req.body || {}
-    const id = (email && String(email).toLowerCase()) || (phone && String(phone)) || ''
+    let { email, phone, otp } = req.body || {}
+    email = email ? String(email).trim().toLowerCase() : ''
+    phone = phone ? String(phone).trim() : ''
+    const id = email || phone
     if (!id || !otp) return res.status(400).json({ error: 'need_id_and_otp' })
 
     const ok = await verifyOtpDb(id, otp)
@@ -312,7 +323,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
          VALUES ($1,'FREE')
          ON CONFLICT (email) DO UPDATE SET updated_at=now()
          RETURNING id,email,phone,plan,plan_expires_at`,
-        [email.toLowerCase()]
+        [email]
       )
       row = r.rows[0]
     } else {
@@ -332,6 +343,45 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     console.error(e)
     res.status(500).json({ error: 'verify_failed' })
   }
+})
+
+// --- Debug Twilio ---
+app.get('/api/debug/twilio/:sid', async (req, res) => {
+  try {
+    if (!twilioClient) return res.status(500).json({ error: 'no_twilio_client' })
+    const msg = await twilioClient.messages(req.params.sid).fetch()
+    res.json({
+      sid: msg.sid,
+      status: msg.status,
+      to: msg.to,
+      from: msg.from,
+      errorCode: msg.errorCode,
+      errorMessage: msg.errorMessage,
+      dateCreated: msg.dateCreated,
+      dateSent: msg.dateSent,
+      dateUpdated: msg.dateUpdated
+    })
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+app.get('/api/debug/twilio', async (_req, res) => {
+  try {
+    if (!twilioClient) return res.status(500).json({ error: 'no_twilio_client' })
+    const msgs = await twilioClient.messages.list({ limit: 10 })
+    res.json(msgs.map(m => ({
+      sid: m.sid, status: m.status, to: m.to, from: m.from,
+      errorCode: m.errorCode, errorMessage: m.errorMessage
+    })))
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// --- Debug CORS/Origins ---
+app.get('/api/debug/origins', (req, res) => {
+  res.json({ allowed: ORIGINS, requestOrigin: req.headers.origin || null })
 })
 
 // Error handler
