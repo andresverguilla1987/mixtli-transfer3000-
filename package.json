@@ -1,9 +1,8 @@
 {
   "name": "mixtli-transfer-backend",
-  "version": "2.11.0",
+  "version": "2.11.2",
   "type": "module",
   "engines": { "node": ">=18" },
-  "main": "server.js",
   "scripts": {
     "start": "node --enable-source-maps server.js"
   },
