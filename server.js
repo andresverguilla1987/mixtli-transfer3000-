@@ -1,5 +1,5 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.9
-// CORS + Email (SendGrid/SMTP) + SMS/WhatsApp (Twilio) + RateLimit + Purga OTP + Debug
+// Mixtli Transfer – Backend (OTP + Health) v2.10  (SMS-only)
+// CORS + Email (SendGrid/SMTP) + SMS (Twilio) + RateLimit + Purga OTP + Debug
 // Node 18+ recomendado (trae fetch). Si no, activamos fallback.
 
 import 'dotenv/config'
@@ -35,12 +35,10 @@ const {
   // CORS
   ALLOWED_ORIGINS = '["http://localhost:8888","http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","https://lighthearted-froyo-9dd448.netlify.app"]',
 
-  // Twilio
+  // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM,              // ej: +12025550123 (SMS)
-  TWILIO_WHATSAPP_FROM,     // ej: whatsapp:+14155238886 (sandbox) o whatsapp:+<tu-num-BAA>
-  TWILIO_PREFER_WHATSAPP = '0'
+  TWILIO_FROM            // ej: +16209517456 (tu número real de Twilio SMS)
 } = process.env
 
 if (!DATABASE_URL) { console.error('[FATAL] Missing DATABASE_URL'); process.exit(1) }
@@ -176,7 +174,7 @@ async function sendMail(to, subject, text) {
   }
 }
 
-// ---------------- SMS / WhatsApp (Twilio) ----------------
+// ---------------- SMS (Twilio) SMS-only ----------------
 let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -184,37 +182,31 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 function normalizePhone(p) {
   if (!p) return ''
-  // quita espacios, guiones y paréntesis
-  return String(p).replace(/[\s\-\(\)]/g, '')
+  // Quita espacios, guiones, paréntesis
+  let s = String(p).replace(/[\s\-\(\)]/g, '')
+  // Si viene "whatsapp:+52xxxx", lo convertimos a "+52xxxx" (SMS-only)
+  if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
+  return s
 }
 
-// Decide canal y manda
-async function sendSmsOrWhatsapp(rawTo, text) {
-  const toRaw = normalizePhone(rawTo)
+// Enviar SIEMPRE por SMS usando TWILIO_FROM
+async function sendSmsOnly(rawTo, text) {
+  const to = normalizePhone(rawTo)
+  if (!twilioClient) { console.log('[SMS:demo]', to, text); return }
 
-  if (!twilioClient) { console.log('[SMS:demo]', toRaw, text); return }
-
-  let to = toRaw
-  let from = TWILIO_FROM
-
-  const looksWhatsApp = toRaw.startsWith('whatsapp:')
-  if (looksWhatsApp || (TWILIO_PREFER_WHATSAPP === '1' && TWILIO_WHATSAPP_FROM)) {
-    if (!looksWhatsApp && toRaw.startsWith('+')) to = `whatsapp:${toRaw}`
-    from = TWILIO_WHATSAPP_FROM
+  if (!TWILIO_FROM) {
+    console.warn('[SMS] Falta TWILIO_FROM en env')
+    return
   }
 
-  if (!from) { console.warn('[SMS] Falta TWILIO_FROM/TWILIO_WHATSAPP_FROM'); return }
-
-  // LOG de depuración para confirmar canal
-  console.log('[WA/SMS] to=', to, 'from=', from, 'preferWA=', TWILIO_PREFER_WHATSAPP)
-
+  console.log('[SMS ONLY] to=', to, 'from=', TWILIO_FROM)
   try {
-    const msg = await twilioClient.messages.create({ to, from, body: text })
+    const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body: text })
     console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
   } catch (e) {
     const code = e?.code || e?.status || ''
-    const msg = e?.message || String(e)
-    console.warn('[Twilio ERROR]', code, msg)
+    const message = e?.message || String(e)
+    console.warn('[SMS ERROR]', code, message)
   }
 }
 
@@ -260,13 +252,12 @@ const otpLimiter = rateLimit({
   max: 8,                  // 8 intentos por IP
   standardHeaders: true,
   legacyHeaders: false,
-  // no contar preflight
-  skip: (req) => req.method === 'OPTIONS',
+  skip: (req) => req.method === 'OPTIONS', // no contar preflight
 })
 
 // ---------------- Routes ----------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.9' }))
+app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.10', channel: 'sms-only' }))
 
 // Enviar OTP (email o phone)
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
@@ -286,7 +277,7 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
         `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`
       )
     } else {
-      await sendSmsOrWhatsapp(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
+      await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
     }
 
     res.json({ ok: true, msg: 'otp_sent' })
