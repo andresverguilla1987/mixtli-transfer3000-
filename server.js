@@ -1,6 +1,6 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.10  (SMS-only)
+// Mixtli Transfer – Backend (OTP + Health) v2.10 (SMS-only)
 // CORS + Email (SendGrid/SMTP) + SMS (Twilio) + RateLimit + Purga OTP + Debug
-// Node 18+ recomendado (trae fetch). Si no, activamos fallback.
+// Requiere Node 18+ (fetch nativo). Activo fallback si hace falta.
 
 import 'dotenv/config'
 import express from 'express'
@@ -23,7 +23,7 @@ const {
   JWT_SECRET = 'change_me',
   OTP_TTL_MIN = '10',
 
-  // Email
+  // Email (opcional)
   SENDGRID_API_KEY,
   SENDGRID_FROM,
   SMTP_HOST,
@@ -38,24 +38,26 @@ const {
   // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM            // ej: +16209517456 (tu número real de Twilio SMS)
+  TWILIO_FROM            // p. ej. +16209517456 (tu número SMS de Twilio)
 } = process.env
 
-if (!DATABASE_URL) { console.error('[FATAL] Missing DATABASE_URL'); process.exit(1) }
+if (!DATABASE_URL) {
+  console.error('[FATAL] Missing DATABASE_URL')
+  process.exit(1)
+}
 
-// Render/Postgres requiere SSL (evita self-signed).
+// ---------- DB ----------
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 })
 
-// ---------------- DB bootstrap ----------------
 async function initDb() {
   try { await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";') }
-  catch (e) { console.warn('[DB] pgcrypto ext no disponible:', e?.message || e) }
+  catch (e) { console.warn('[DB] pgcrypto no disponible:', e?.message || e) }
 
   try { await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";') }
-  catch (e) { console.warn('[DB] uuid-ossp ext no disponible:', e?.message || e) }
+  catch (e) { console.warn('[DB] uuid-ossp no disponible:', e?.message || e) }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -79,6 +81,7 @@ async function initDb() {
     );
   `)
 
+  // índices únicos condicionales
   await pool.query(`
   DO $$
   BEGIN
@@ -93,7 +96,7 @@ async function initDb() {
   console.log('[DB] ready')
 }
 
-// ---------------- OTP helpers ----------------
+// ---------- OTP helpers ----------
 function rand6() {
   return String(Math.floor(100000 + Math.random() * 900000))
 }
@@ -130,9 +133,9 @@ async function purgeOtps() {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') }
   catch (e) { console.warn('[OTP purge] error:', e?.message || e) }
 }
-setInterval(purgeOtps, 10 * 60 * 1000) // cada 10 minutos
+setInterval(purgeOtps, 10 * 60 * 1000) // cada 10 min
 
-// ---------------- Mail (SendGrid/SMTP) ----------------
+// ---------- Mail (SendGrid/SMTP; opcional) ----------
 let smtpTransport = null
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   const portN = parseInt(SMTP_PORT || '587', 10)
@@ -174,7 +177,7 @@ async function sendMail(to, subject, text) {
   }
 }
 
-// ---------------- SMS (Twilio) SMS-only ----------------
+// ---------- SMS (Twilio: SMS-only) ----------
 let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -182,25 +185,29 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 function normalizePhone(p) {
   if (!p) return ''
-  // Quita espacios, guiones, paréntesis
+  // Quita espacios, guiones y paréntesis
   let s = String(p).replace(/[\s\-\(\)]/g, '')
-  // Si viene "whatsapp:+52xxxx", lo convertimos a "+52xxxx" (SMS-only)
+  // Si llega "whatsapp:+52...", elimínalo (solo SMS)
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
+  // Asegura formato E.164 básico (+ prefijo)
+  if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
 }
 
-// Enviar SIEMPRE por SMS usando TWILIO_FROM
 async function sendSmsOnly(rawTo, text) {
   const to = normalizePhone(rawTo)
-  if (!twilioClient) { console.log('[SMS:demo]', to, text); return }
 
+  if (!twilioClient) {
+    console.log('[SMS:demo]', to, text)
+    return
+  }
   if (!TWILIO_FROM) {
     console.warn('[SMS] Falta TWILIO_FROM en env')
     return
   }
 
-  console.log('[SMS ONLY] to=', to, 'from=', TWILIO_FROM)
   try {
+    console.log('[SMS ONLY] to=', to, 'from=', TWILIO_FROM)
     const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body: text })
     console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
   } catch (e) {
@@ -210,13 +217,12 @@ async function sendSmsOnly(rawTo, text) {
   }
 }
 
-// ---------------- App / CORS ----------------
+// ---------- App / CORS ----------
 const app = express()
 
 let ORIGINS = []
 try { ORIGINS = JSON.parse(ALLOWED_ORIGINS) } catch { ORIGINS = [] }
 
-// helper para previews de Netlify (*.netlify.app)
 function isNetlifyPreview(origin) {
   try {
     const h = new URL(origin).hostname
@@ -226,7 +232,7 @@ function isNetlifyPreview(origin) {
 
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true) // Postman / curl / SSR
+    if (!o) return cb(null, true)                  // Postman / curl / SSR
     if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
@@ -234,28 +240,30 @@ const corsMw = cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'x-cron-token', 'x-mixtli-token'],
   optionsSuccessStatus: 204
 })
-app.use((req, res, next) => corsMw(req, res, (err) => {
-  if (err?.message === 'origin_not_allowed') {
-    return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
-  }
-  next()
-}))
+
+app.use((req, res, next) => {
+  corsMw(req, res, (err) => {
+    if (err?.message === 'origin_not_allowed') {
+      return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
+    }
+    next()
+  })
+})
 app.options('*', corsMw)
 
-// Fix para express-rate-limit v7 en Render (1 proxy delante)
-app.set('trust proxy', 1)
+app.set('trust proxy', 1) // Render tiene 1 proxy delante
 app.use(express.json({ limit: '2mb' }))
 
-// ---------------- Rate-limit OTP ----------------
+// ---------- Rate-limit OTP ----------
 const otpLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 min
-  max: 8,                  // 8 intentos por IP
+  max: 8,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === 'OPTIONS', // no contar preflight
+  skip: (req) => req.method === 'OPTIONS'
 })
 
-// ---------------- Routes ----------------
+// ---------- Rutas ----------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.10', channel: 'sms-only' }))
 
