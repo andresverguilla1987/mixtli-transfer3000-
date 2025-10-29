@@ -1,6 +1,6 @@
-// Mixtli Transfer – Backend v2.11 (SMS-only + presign S3/R2)
+// Mixtli Transfer – Backend v2.11.2 (SMS-only + presign S3/R2)
 // OTP por SMS (Twilio) + CORS + RateLimit + Purga OTP + Debug + Presign
-// Node 18+ (fetch nativo). Si no, se activa fallback.
+// Requiere Node 18+ (fetch nativo). Si no, activa fallback.
 
 import 'dotenv/config'
 import express from 'express'
@@ -52,7 +52,7 @@ const {
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
   S3_FORCE_PATH_STYLE = 'true',
-  PUBLIC_BASE_URL, // opcional para construir URL pública bonita
+  PUBLIC_BASE_URL // opcional para URLs bonitas
 } = process.env
 
 if (!DATABASE_URL) {
@@ -95,6 +95,7 @@ async function initDb() {
     );
   `)
 
+  // índices únicos condicionales
   await pool.query(`
   DO $$
   BEGIN
@@ -216,12 +217,14 @@ async function sendSmsOnly(rawTo, text) {
 
 // ---------- S3/R2 Presign ----------
 let s3 = null
+const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
+
 if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
   s3 = new S3Client({
     region: S3_REGION,
     endpoint: S3_ENDPOINT,
     credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
-    forcePathStyle: S3_FORCE_PATH_STYLE === 'true',
+    forcePathStyle: FORCE_PATH,
   })
 }
 
@@ -240,7 +243,7 @@ function requireAuth(req, res, next) {
 async function buildPublicUrl(key) {
   if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/+$/,'')}/${key}`
   const host = S3_ENDPOINT.replace(/^https?:\/\//, '')
-  return (S3_FORCE_PATH_STYLE === 'true')
+  return FORCE_PATH
     ? `${S3_ENDPOINT}/${S3_BUCKET}/${key}`
     : `https://${S3_BUCKET}.${host}/${key}`
 }
@@ -289,7 +292,7 @@ const otpLimiter = rateLimit({
 // ---------- Rutas ----------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.11', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.11.2', channel: 'sms-only' }))
 
 // Enviar OTP
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
@@ -362,12 +365,14 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     const { filename, type = 'application/octet-stream' } = req.body || {}
     const base = safeName(filename || `file-${Date.now()}`)
     const key = `uploads/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${base}`
+
+    // Nota: NO usar ACL en R2 (suele estar deshabilitado)
     const cmd = new PutObjectCommand({
       Bucket: S3_BUCKET,
       Key: key,
-      ContentType: type,
-      ACL: 'public-read', // si tu bucket es privado, quita esta línea
+      ContentType: type
     })
+
     const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 minutos
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
