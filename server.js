@@ -1,6 +1,6 @@
-// Mixtli Transfer – Backend (OTP + Health) v2.10 (SMS-only)
-// CORS + Email (SendGrid/SMTP) + SMS (Twilio) + RateLimit + Purga OTP + Debug
-// Requiere Node 18+ (fetch nativo). Activo fallback si hace falta.
+// Mixtli Transfer – Backend v2.11 (SMS-only + presign S3/R2)
+// OTP por SMS (Twilio) + CORS + RateLimit + Purga OTP + Debug + Presign
+// Node 18+ (fetch nativo). Si no, se activa fallback.
 
 import 'dotenv/config'
 import express from 'express'
@@ -10,6 +10,11 @@ import pg from 'pg'
 import nodemailer from 'nodemailer'
 import twilio from 'twilio'
 import rateLimit from 'express-rate-limit'
+
+// --- Presign S3/R2
+import crypto from 'crypto'
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
 // --- Fallback de fetch para runtimes viejos ---
 if (!globalThis.fetch) {
@@ -38,7 +43,16 @@ const {
   // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM            // p. ej. +16209517456 (tu número SMS de Twilio)
+  TWILIO_FROM, // p. ej. +16209517456
+
+  // S3/R2
+  S3_ENDPOINT,
+  S3_BUCKET,
+  S3_REGION = 'auto',
+  S3_ACCESS_KEY_ID,
+  S3_SECRET_ACCESS_KEY,
+  S3_FORCE_PATH_STYLE = 'true',
+  PUBLIC_BASE_URL, // opcional para construir URL pública bonita
 } = process.env
 
 if (!DATABASE_URL) {
@@ -49,7 +63,7 @@ if (!DATABASE_URL) {
 // ---------- DB ----------
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 })
 
 async function initDb() {
@@ -81,7 +95,6 @@ async function initDb() {
     );
   `)
 
-  // índices únicos condicionales
   await pool.query(`
   DO $$
   BEGIN
@@ -97,9 +110,7 @@ async function initDb() {
 }
 
 // ---------- OTP helpers ----------
-function rand6() {
-  return String(Math.floor(100000 + Math.random() * 900000))
-}
+function rand6() { return String(Math.floor(100000 + Math.random() * 900000)) }
 
 async function createOtp(key, ttlMin) {
   const code = rand6()
@@ -128,14 +139,13 @@ function signToken(user) {
   return jwt.sign({ uid: user.id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' })
 }
 
-// Purga periódica de OTPs vencidos
 async function purgeOtps() {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') }
   catch (e) { console.warn('[OTP purge] error:', e?.message || e) }
 }
-setInterval(purgeOtps, 10 * 60 * 1000) // cada 10 min
+setInterval(purgeOtps, 10 * 60 * 1000)
 
-// ---------- Mail (SendGrid/SMTP; opcional) ----------
+// ---------- Mail (opcional) ----------
 let smtpTransport = null
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   const portN = parseInt(SMTP_PORT || '587', 10)
@@ -143,7 +153,7 @@ if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
     host: SMTP_HOST,
     port: portN,
     secure: portN === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS }
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
   })
 }
 
@@ -154,15 +164,15 @@ async function sendMail(to, subject, text) {
         personalizations: [{ to: [{ email: to }] }],
         from: { email: SENDGRID_FROM },
         subject,
-        content: [{ type: 'text/plain', value: text }]
+        content: [{ type: 'text/plain', value: text }],
       }
       const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${SENDGRID_API_KEY}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
       })
       if (!r.ok) console.warn('[MAIL] SendGrid error:', await r.text())
       return
@@ -177,7 +187,7 @@ async function sendMail(to, subject, text) {
   }
 }
 
-// ---------- SMS (Twilio: SMS-only) ----------
+// ---------- Twilio SMS-only ----------
 let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -185,36 +195,54 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 function normalizePhone(p) {
   if (!p) return ''
-  // Quita espacios, guiones y paréntesis
   let s = String(p).replace(/[\s\-\(\)]/g, '')
-  // Si llega "whatsapp:+52...", elimínalo (solo SMS)
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
-  // Asegura formato E.164 básico (+ prefijo)
   if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
 }
 
 async function sendSmsOnly(rawTo, text) {
   const to = normalizePhone(rawTo)
-
-  if (!twilioClient) {
-    console.log('[SMS:demo]', to, text)
-    return
-  }
-  if (!TWILIO_FROM) {
-    console.warn('[SMS] Falta TWILIO_FROM en env')
-    return
-  }
-
+  if (!twilioClient) { console.log('[SMS:demo]', to, text); return }
+  if (!TWILIO_FROM) { console.warn('[SMS] Falta TWILIO_FROM'); return }
   try {
     console.log('[SMS ONLY] to=', to, 'from=', TWILIO_FROM)
     const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body: text })
     console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
   } catch (e) {
-    const code = e?.code || e?.status || ''
-    const message = e?.message || String(e)
-    console.warn('[SMS ERROR]', code, message)
+    console.warn('[SMS ERROR]', e?.code || e?.status || '', e?.message || String(e))
   }
+}
+
+// ---------- S3/R2 Presign ----------
+let s3 = null
+if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
+  s3 = new S3Client({
+    region: S3_REGION,
+    endpoint: S3_ENDPOINT,
+    credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
+    forcePathStyle: S3_FORCE_PATH_STYLE === 'true',
+  })
+}
+
+function safeName(name = '') {
+  return name.replace(/[^\w\-.]+/g, '_').slice(0, 180)
+}
+
+function requireAuth(req, res, next) {
+  const auth = req.headers.authorization || ''
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (!token) return res.status(401).json({ error: 'no_token' })
+  try { jwt.verify(token, JWT_SECRET); next() }
+  catch { res.status(401).json({ error: 'invalid_token' }) }
+}
+
+async function buildPublicUrl(key) {
+  if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/+$/,'')}/${key}`
+  const host = S3_ENDPOINT.replace(/^https?:\/\//, '')
+  return (S3_FORCE_PATH_STYLE === 'true')
+    ? `${S3_ENDPOINT}/${S3_BUCKET}/${key}`
+    : `https://${S3_BUCKET}.${host}/${key}`
 }
 
 // ---------- App / CORS ----------
@@ -224,50 +252,46 @@ let ORIGINS = []
 try { ORIGINS = JSON.parse(ALLOWED_ORIGINS) } catch { ORIGINS = [] }
 
 function isNetlifyPreview(origin) {
-  try {
-    const h = new URL(origin).hostname
-    return /\.netlify\.app$/i.test(h)
-  } catch { return false }
+  try { return /\.netlify\.app$/i.test(new URL(origin).hostname) } catch { return false }
 }
 
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true)                  // Postman / curl / SSR
+    if (!o) return cb(null, true)
     if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'x-cron-token', 'x-mixtli-token'],
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
 })
 
-app.use((req, res, next) => {
-  corsMw(req, res, (err) => {
-    if (err?.message === 'origin_not_allowed') {
-      return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
-    }
-    next()
-  })
-})
+app.use((req, res, next) => corsMw(req, res, (err) => {
+  if (err?.message === 'origin_not_allowed') {
+    return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
+  }
+  next()
+}))
 app.options('*', corsMw)
 
-app.set('trust proxy', 1) // Render tiene 1 proxy delante
+app.set('trust proxy', 1)
 app.use(express.json({ limit: '2mb' }))
 
 // ---------- Rate-limit OTP ----------
 const otpLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000, // 5 min
+  windowMs: 5 * 60 * 1000,
   max: 8,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === 'OPTIONS'
+  skip: (req) => req.method === 'OPTIONS',
 })
 
 // ---------- Rutas ----------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.10', channel: 'sms-only' }))
+app.get('/api/health', (_req, res) =>
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.11', channel: 'sms-only' }))
 
-// Enviar OTP (email o phone)
+// Enviar OTP
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
   try {
     let { email, phone } = req.body || {}
@@ -277,17 +301,11 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
 
     const code = await createOtp(id, OTP_TTL_MIN)
-
     if (email) {
-      await sendMail(
-        email,
-        'Tu código Mixtli',
-        `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`
-      )
+      await sendMail(email, 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`)
     } else {
       await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
     }
-
     res.json({ ok: true, msg: 'otp_sent' })
   } catch (e) {
     console.error(e)
@@ -296,16 +314,11 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
 })
 
 // Alias legacy
-app.post('/api/auth/verify', (req, _res, next) => {
-  console.log('[ALIAS] /api/auth/verify -> /api/auth/verify-otp')
-  req.url = '/api/auth/verify-otp'
-  next()
-})
+app.post('/api/auth/verify', (req, _res, next) => { req.url = '/api/auth/verify-otp'; next() })
 
-// Verificar OTP y upsert usuario
+// Verificar OTP
 app.post('/api/auth/verify-otp', async (req, res) => {
   try {
-    console.log('[VERIFY-OTP] body:', req.body)
     let { email, phone, otp } = req.body || {}
     email = email ? String(email).trim().toLowerCase() : ''
     phone = phone ? String(phone).trim() : ''
@@ -317,23 +330,21 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 
     let row
     if (email) {
-      const r = await pool.query(
+      row = (await pool.query(
         `INSERT INTO users (email, plan)
          VALUES ($1,'FREE')
          ON CONFLICT (email) DO UPDATE SET updated_at=now()
          RETURNING id,email,phone,plan,plan_expires_at`,
         [email]
-      )
-      row = r.rows[0]
+      )).rows[0]
     } else {
-      const r = await pool.query(
+      row = (await pool.query(
         `INSERT INTO users (phone, plan)
          VALUES ($1,'FREE')
          ON CONFLICT (phone) DO UPDATE SET updated_at=now()
          RETURNING id,email,phone,plan,plan_expires_at`,
         [phone]
-      )
-      row = r.rows[0]
+      )).rows[0]
     }
 
     const token = signToken(row)
@@ -344,21 +355,46 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 })
 
+// --- Presign S3/R2 (subidas tipo WeTransfer) ---
+app.post('/api/presign', requireAuth, async (req, res) => {
+  try {
+    if (!s3) return res.status(500).json({ error: 's3_not_configured' })
+    const { filename, type = 'application/octet-stream' } = req.body || {}
+    const base = safeName(filename || `file-${Date.now()}`)
+    const key = `uploads/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${base}`
+    const cmd = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      ContentType: type,
+      ACL: 'public-read', // si tu bucket es privado, quita esta línea
+    })
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 minutos
+    res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
+  } catch (e) {
+    console.error('[presign_failed]', e)
+    res.status(500).json({ error: 'presign_failed', detail: String(e?.message || e) })
+  }
+})
+
+app.post('/api/complete', requireAuth, async (req, res) => {
+  try {
+    const { key } = req.body || {}
+    if (!key) return res.status(400).json({ error: 'key_required' })
+    res.json({ ok: true, publicUrl: await buildPublicUrl(key) })
+  } catch (e) {
+    res.status(500).json({ error: 'complete_failed', detail: String(e?.message || e) })
+  }
+})
+
 // --- Debug Twilio ---
 app.get('/api/debug/twilio/:sid', async (req, res) => {
   try {
     if (!twilioClient) return res.status(500).json({ error: 'no_twilio_client' })
     const msg = await twilioClient.messages(req.params.sid).fetch()
     res.json({
-      sid: msg.sid,
-      status: msg.status,
-      to: msg.to,
-      from: msg.from,
-      errorCode: msg.errorCode,
-      errorMessage: msg.errorMessage,
-      dateCreated: msg.dateCreated,
-      dateSent: msg.dateSent,
-      dateUpdated: msg.dateUpdated
+      sid: msg.sid, status: msg.status, to: msg.to, from: msg.from,
+      errorCode: msg.errorCode, errorMessage: msg.errorMessage,
+      dateCreated: msg.dateCreated, dateSent: msg.dateSent, dateUpdated: msg.dateUpdated,
     })
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) })
@@ -371,19 +407,18 @@ app.get('/api/debug/twilio', async (_req, res) => {
     const msgs = await twilioClient.messages.list({ limit: 10 })
     res.json(msgs.map(m => ({
       sid: m.sid, status: m.status, to: m.to, from: m.from,
-      errorCode: m.errorCode, errorMessage: m.errorMessage
+      errorCode: m.errorCode, errorMessage: m.errorMessage,
     })))
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) })
   }
 })
 
-// --- Debug CORS/Origins ---
-app.get('/api/debug/origins', (req, res) => {
-  res.json({ allowed: ORIGINS, requestOrigin: req.headers.origin || null })
-})
+// --- Debug CORS ---
+app.get('/api/debug/origins', (req, res) =>
+  res.json({ allowed: ORIGINS, requestOrigin: req.headers.origin || null }))
 
-// Error handler
+// --- Error handler ---
 app.use((err, _req, res, _next) => {
   console.error('[ERR]', err?.message || err)
   res.status(500).json({ error: 'internal_error', detail: String(err?.message || err) })
