@@ -1,4 +1,4 @@
-// Mixtli Transfer – Backend v2.11.2 (SMS-only + presign S3/R2)
+// Mixtli Transfer – Backend v2.12 (SMS-only + presign S3/R2)
 // OTP por SMS (Twilio) + CORS + RateLimit + Purga OTP + Debug + Presign
 // Requiere Node 18+ (fetch nativo). Si no, activa fallback.
 
@@ -16,12 +16,13 @@ import crypto from 'crypto'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
-// --- Fallback de fetch para runtimes viejos ---
+// --- Fallback de fetch (Node <=17)
 if (!globalThis.fetch) {
   const { default: nodeFetch } = await import('node-fetch')
   globalThis.fetch = nodeFetch
 }
 
+// -------------------- ENV --------------------
 const {
   PORT = 10000,
   DATABASE_URL,
@@ -43,16 +44,16 @@ const {
   // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM, // p. ej. +16209517456
+  TWILIO_FROM, // ej: +16209517456
 
   // S3/R2
-  S3_ENDPOINT,
-  S3_BUCKET,
+  S3_ENDPOINT,                 // ej: https://<accountid>.r2.cloudflarestorage.com
+  S3_BUCKET,                   // ej: mixtlitransfer3000
   S3_REGION = 'auto',
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
-  S3_FORCE_PATH_STYLE = 'true',
-  PUBLIC_BASE_URL // opcional para URLs bonitas
+  S3_FORCE_PATH_STYLE = 'true', // en R2 debe ser true
+  PUBLIC_BASE_URL              // opcional (r2.dev / dominio público / CDN)
 } = process.env
 
 if (!DATABASE_URL) {
@@ -60,7 +61,7 @@ if (!DATABASE_URL) {
   process.exit(1)
 }
 
-// ---------- DB ----------
+// -------------------- DB --------------------
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -78,7 +79,7 @@ async function initDb() {
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       email TEXT,
       phone TEXT,
-      plan TEXT NOT NULL DEFAULT 'FREE',
+      plan  TEXT NOT NULL DEFAULT 'FREE',
       plan_expires_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -95,7 +96,6 @@ async function initDb() {
     );
   `)
 
-  // índices únicos condicionales
   await pool.query(`
   DO $$
   BEGIN
@@ -110,10 +110,12 @@ async function initDb() {
   console.log('[DB] ready')
 }
 
-// ---------- OTP helpers ----------
+// -------------------- OTP helpers --------------------
+const ttlMin = parseInt(OTP_TTL_MIN || '10', 10)
+
 function rand6() { return String(Math.floor(100000 + Math.random() * 900000)) }
 
-async function createOtp(key, ttlMin) {
+async function createOtp(key) {
   const code = rand6()
   await pool.query(
     `INSERT INTO otps (key, code, exp)
@@ -144,9 +146,9 @@ async function purgeOtps() {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') }
   catch (e) { console.warn('[OTP purge] error:', e?.message || e) }
 }
-setInterval(purgeOtps, 10 * 60 * 1000)
+setInterval(purgeOtps, 10 * 60 * 1000) // cada 10 min
 
-// ---------- Mail (opcional) ----------
+// -------------------- Mail (opcional) --------------------
 let smtpTransport = null
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   const portN = parseInt(SMTP_PORT || '587', 10)
@@ -188,7 +190,7 @@ async function sendMail(to, subject, text) {
   }
 }
 
-// ---------- Twilio SMS-only ----------
+// -------------------- Twilio (SMS-only) --------------------
 let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -215,14 +217,14 @@ async function sendSmsOnly(rawTo, text) {
   }
 }
 
-// ---------- S3/R2 Presign ----------
-let s3 = null
+// -------------------- S3 / R2 --------------------
 const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
+let s3 = null
 
 if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
   s3 = new S3Client({
     region: S3_REGION,
-    endpoint: S3_ENDPOINT,
+    endpoint: S3_ENDPOINT, // IMPORTANTE: sin el nombre del bucket
     credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
     forcePathStyle: FORCE_PATH,
   })
@@ -242,13 +244,13 @@ function requireAuth(req, res, next) {
 
 async function buildPublicUrl(key) {
   if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/+$/,'')}/${key}`
-  const host = S3_ENDPOINT.replace(/^https?:\/\//, '')
+  const host = S3_ENDPOINT.replace(/^https?:\/\//, '').replace(/\/+$/,'')
   return FORCE_PATH
-    ? `${S3_ENDPOINT}/${S3_BUCKET}/${key}`
+    ? `${S3_ENDPOINT.replace(/\/+$/,'')}/${S3_BUCKET}/${key}`
     : `https://${S3_BUCKET}.${host}/${key}`
 }
 
-// ---------- App / CORS ----------
+// -------------------- App / CORS --------------------
 const app = express()
 
 let ORIGINS = []
@@ -260,7 +262,7 @@ function isNetlifyPreview(origin) {
 
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true)
+    if (!o) return cb(null, true) // Postman / curl / SSR
     if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
@@ -280,7 +282,7 @@ app.options('*', corsMw)
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '2mb' }))
 
-// ---------- Rate-limit OTP ----------
+// -------------------- Rate-limit OTP --------------------
 const otpLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 8,
@@ -289,10 +291,15 @@ const otpLimiter = rateLimit({
   skip: (req) => req.method === 'OPTIONS',
 })
 
-// ---------- Rutas ----------
+// -------------------- Rutas --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.11.2', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.12', channel: 'sms-only' }))
+
+// --- Aliases para clientes sin /api ---
+app.post('/auth/register', (req, _res, next) => { console.log('[ALIAS] /auth/register -> /api/auth/register'); req.url = '/api/auth/register'; next() })
+app.post('/auth/verify-otp', (req, _res, next) => { console.log('[ALIAS] /auth/verify-otp -> /api/auth/verify-otp'); req.url = '/api/auth/verify-otp'; next() })
+app.post('/auth/verify', (req, _res, next) => { console.log('[ALIAS] /auth/verify -> /api/auth/verify-otp'); req.url = '/api/auth/verify-otp'; next() })
 
 // Enviar OTP
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
@@ -303,21 +310,18 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
     const id = email || phone
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
 
-    const code = await createOtp(id, OTP_TTL_MIN)
+    const code = await createOtp(id)
     if (email) {
-      await sendMail(email, 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${OTP_TTL_MIN} minutos.`)
+      await sendMail(email, 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
     } else {
-      await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${OTP_TTL_MIN} min.`)
+      await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
     }
     res.json({ ok: true, msg: 'otp_sent' })
   } catch (e) {
-    console.error(e)
+    console.error('[register_failed]', e)
     res.status(500).json({ error: 'otp_send_failed' })
   }
 })
-
-// Alias legacy
-app.post('/api/auth/verify', (req, _res, next) => { req.url = '/api/auth/verify-otp'; next() })
 
 // Verificar OTP
 app.post('/api/auth/verify-otp', async (req, res) => {
@@ -353,7 +357,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     const token = signToken(row)
     res.json({ token, user: row })
   } catch (e) {
-    console.error(e)
+    console.error('[verify_failed]', e)
     res.status(500).json({ error: 'verify_failed' })
   }
 })
@@ -364,16 +368,16 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     if (!s3) return res.status(500).json({ error: 's3_not_configured' })
     const { filename, type = 'application/octet-stream' } = req.body || {}
     const base = safeName(filename || `file-${Date.now()}`)
-    const key = `uploads/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${base}`
+    const key  = `uploads/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${base}`
 
-    // Nota: NO usar ACL en R2 (suele estar deshabilitado)
+    // Nota: en R2 normalmente no se usa ACL (puede estar deshabilitado).
     const cmd = new PutObjectCommand({
       Bucket: S3_BUCKET,
       Key: key,
-      ContentType: type
+      ContentType: type,
     })
 
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 minutos
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 min
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
     console.error('[presign_failed]', e)
@@ -387,6 +391,7 @@ app.post('/api/complete', requireAuth, async (req, res) => {
     if (!key) return res.status(400).json({ error: 'key_required' })
     res.json({ ok: true, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
+    console.error('[complete_failed]', e)
     res.status(500).json({ error: 'complete_failed', detail: String(e?.message || e) })
   }
 })
@@ -419,11 +424,11 @@ app.get('/api/debug/twilio', async (_req, res) => {
   }
 })
 
-// --- Debug CORS ---
+// --- Debug CORS / Config ---
 app.get('/api/debug/origins', (req, res) =>
   res.json({ allowed: ORIGINS, requestOrigin: req.headers.origin || null }))
 
-// --- Error handler ---
+// --- Error handler global ---
 app.use((err, _req, res, _next) => {
   console.error('[ERR]', err?.message || err)
   res.status(500).json({ error: 'internal_error', detail: String(err?.message || err) })
