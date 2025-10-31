@@ -1,15 +1,34 @@
-Mixtli Transfer 3000 — Bulk Uploader
+# Mixtli Backend v2.13r
+Cambio: `/api/pack/create` devuelve **siempre** `"/share/:id"` (FORCE_RELATIVE_URLS=true).
 
-Contenido:
-- mixtli-bulk-upload.ps1  → Script PowerShell para subir en lote
-- run-mixtli-upload.bat   → Lanzador de 1 clic (usa ExecutionPolicy Bypass)
-- README.txt              
+## Variables Render
+```
+PORT=10000
+DATABASE_URL=postgres://...
+JWT_SECRET=supersecret
+OTP_TTL_MIN=10
 
-Uso rápido (recomendado):
-1) Descomprime la carpeta donde quieras.
-2) Haz doble clic en: run-mixtli-upload.bat
-   - Subirá archivos desde %USERPROFILE%\Uploads (crea la carpeta si no existe).
-3) Al final imprime la ruta de un CSV con los links GET.
+# Twilio SMS-only
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_FROM=+1XXXXXXXXXX
 
-Avanzado (desde PowerShell):
-  & "ruta\mixtli-bulk-upload.ps1" -Folder "$env:USERPROFILE\Pictures" -Patterns "*.jpg","*.png","*.pdf" -ExpireSec 604800
+# R2 (sin bucket en endpoint)
+S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+S3_BUCKET=mixtlitransfer3000
+S3_REGION=auto
+S3_ACCESS_KEY_ID=...
+S3_SECRET_ACCESS_KEY=...
+S3_FORCE_PATH_STYLE=true
+
+# Forzar URL relativa del paquete
+FORCE_RELATIVE_URLS=true
+```
+
+## Netlify _redirects (frontend)
+```
+/ api/health 200
+/api/*     https://mixtli-transfer3000.onrender.com/:splat  200
+/share/*   https://mixtli-transfer3000.onrender.com/share/:splat  200
+/*         /index.html  200
+```
