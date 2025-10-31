@@ -1,4 +1,4 @@
-// Mixtli Transfer – Backend v2.13 (SMS-only + presign S3/R2 + Packages)
+// Mixtli Transfer – Backend v2.13.1 (SMS-only + presign S3/R2 + Packages)
 // OTP por SMS (Twilio) + CORS + RateLimit + Purga OTP + Debug + Presign + Paquetes
 
 import 'dotenv/config'
@@ -26,6 +26,7 @@ const {
   JWT_SECRET = 'change_me',
   OTP_TTL_MIN = '10',
 
+  // Email (opcional)
   SENDGRID_API_KEY,
   SENDGRID_FROM,
   SMTP_HOST,
@@ -34,8 +35,10 @@ const {
   SMTP_PASS,
   SMTP_FROM,
 
+  // CORS
   ALLOWED_ORIGINS = '["http://localhost:8888","http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","https://lighthearted-froyo-9dd448.netlify.app"]',
 
+  // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_FROM, // +1xxxxxxxxxx
@@ -95,7 +98,7 @@ async function initDb() {
     END IF;
   END $$;`)
 
-  -- Paquetes
+  // Paquetes
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -152,6 +155,7 @@ async function verifyOtpDb(key, code) {
 function signToken(user) {
   return jwt.sign({ uid: user.id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' })
 }
+
 function authUid(req) {
   try {
     const h = req.headers.authorization || ''
@@ -161,6 +165,7 @@ function authUid(req) {
     return dec?.uid || null
   } catch { return null }
 }
+
 function requireAuth(req, res, next) {
   const uid = authUid(req)
   if (!uid) return res.status(401).json({ error: 'no_token' })
@@ -173,6 +178,7 @@ async function purgeOtps() {
 }
 setInterval(purgeOtps, 10 * 60 * 1000)
 
+// --- Mail (opcional)
 let smtpTransport = null
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   const portN = parseInt(SMTP_PORT || '587', 10)
@@ -202,6 +208,7 @@ async function sendMail(to, subject, text) {
   } catch (e) { console.warn('[MAIL] failed', e?.message || e) }
 }
 
+// --- Twilio (SMS-only)
 let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -223,7 +230,7 @@ async function sendSmsOnly(rawTo, text) {
   } catch (e) { console.warn('[SMS ERROR]', e?.code || e?.status || '', e?.message || String(e)) }
 }
 
-// S3/R2
+// --- S3/R2
 const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
 let s3 = null
 if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
@@ -282,7 +289,7 @@ const otpLimiter = rateLimit({
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13.1', channel: 'sms-only' }))
 
 // Aliases sin /api
 app.post('/auth/register', (req, _res, next) => { req.url = '/api/auth/register'; next() })
@@ -346,7 +353,6 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     const { filename, type = 'application/octet-stream' } = req.body || {}
     const base = safeName(filename || `file-${Date.now()}`)
     const key  = `uploads/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${base}`
-
     const cmd = new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, ContentType: type })
     const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 min
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
@@ -368,9 +374,8 @@ app.post('/api/complete', requireAuth, async (req, res) => {
 app.post('/api/pack/create', requireAuth, async (req, res) => {
   try {
     const { title = 'Mis archivos', ttlDays = 30, files = [] } = req.body || {}
-    if (!Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ error: 'no_files' })
-    }
+    if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: 'no_files' })
+
     const ttl = Math.min(Math.max(parseInt(ttlDays || 30, 10), 1), 180)
     const totalSize = files.reduce((a, f) => a + (f.size || 0), 0)
 
@@ -382,14 +387,13 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     )
     const pid = r.rows[0].id
 
-    // bulk insert files
+    // bulk insert files (orden y parámetros seguros)
     const values = []
     const params = []
-    files.forEach(f => {
+    files.forEach((f) => {
       params.push(pid, f.key, f.name || null, f.size || 0, f.type || null)
-      values.push(
-        `($${params.length-4},$${params.length-3},$${params.length-2},$${params.length-1},$${params.length})`
-      )
+      const n = params.length
+      values.push(`($${n-4},$${n-3},$${n-2},$${n-1},$${n})`)
     })
     await pool.query(
       `INSERT INTO package_files (package_id, key, filename, size, content_type)
@@ -399,7 +403,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
 
     const base = (PUBLIC_BASE_URL || '').replace(/\/+$/,'')
     const sharePath = `/share/${pid}`
-    const url = base ? base + sharePath : sharePath
+    const url = base ? (base + sharePath) : sharePath
     res.json({ ok: true, id: pid, url, expires_at: r.rows[0].expires_at })
   } catch (e) {
     console.error('[pack_create_failed]', e)
