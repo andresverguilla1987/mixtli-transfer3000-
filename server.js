@@ -1,6 +1,5 @@
-// Mixtli Transfer – Backend v2.13r (SMS-only + presign S3/R2 + Packages)
-// Cambio clave: /api/pack/create devuelve SIEMPRE url relativa "/share/:id"
-// OTP (Twilio) + CORS + RateLimit + Purga OTP + Debug + Presign + Paquetes
+// Mixtli Transfer – Backend v2.13s (SMS-only + presign S3/R2 + Packages, URLs relativas)
+// OTP (Twilio) + CORS + RateLimit + Purga OTP/Paquetes + Debug + Presign + Paquetes
 
 import 'dotenv/config'
 import express from 'express'
@@ -35,8 +34,10 @@ const {
   SMTP_PASS,
   SMTP_FROM,
 
+  // CORS
   ALLOWED_ORIGINS = '["http://localhost:8888","http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","https://lighthearted-froyo-9dd448.netlify.app"]',
 
+  // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_FROM, // +1xxxxxxxxxx
@@ -49,7 +50,10 @@ const {
   S3_SECRET_ACCESS_KEY,
   S3_FORCE_PATH_STYLE = 'true', // en R2 => true
   PUBLIC_BASE_URL,              // opcional (solo para links directos de archivos)
-  FORCE_RELATIVE_URLS = 'true'  // <-- NUEVO: default true para /share/:id
+  FORCE_RELATIVE_URLS = 'true', // default: siempre /share/:id
+
+  // Opcional: disposición sugerida para descarga
+  CONTENT_DISPOSITION = ''      // ej: 'attachment'
 } = process.env
 
 if (!DATABASE_URL) {
@@ -60,9 +64,13 @@ if (!DATABASE_URL) {
 // -------------------- DB --------------------
 const pool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } })
 
+async function safeExec(sql) {
+  try { await pool.query(sql) } catch (e) { /* noop */ }
+}
+
 async function initDb() {
-  try { await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";') } catch (e) {}
-  try { await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";') } catch (e) {}
+  await safeExec('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
+  await safeExec('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -97,7 +105,6 @@ async function initDb() {
     END IF;
   END $$;`)
 
-  // Paquetes
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -120,13 +127,32 @@ async function initDb() {
     );
   `)
 
+  // Índices útiles
+  await safeExec(`CREATE INDEX IF NOT EXISTS package_files_pkg_idx ON package_files(package_id);`)
+  await safeExec(`CREATE INDEX IF NOT EXISTS packages_expires_idx ON packages(expires_at);`)
+
   console.log('[DB] ready')
 }
 
 // -------------------- Helpers --------------------
 const ttlMin = parseInt(OTP_TTL_MIN || '10', 10)
+const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
 
 function rand6() { return String(Math.floor(100000 + Math.random() * 900000)) }
+
+function normalizePhone(p) {
+  if (!p) return ''
+  let s = String(p).trim().replace(/[\s\-\(\)]/g, '')
+  if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
+  if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
+  return s
+}
+
+function normalizeId(email, phone) {
+  const em = (email || '').trim().toLowerCase()
+  const ph = normalizePhone(phone || '')
+  return em || ph
+}
 
 async function createOtp(key) {
   const code = rand6()
@@ -173,8 +199,13 @@ function requireAuth(req, res, next) {
 async function purgeOtps() {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') } catch {}
 }
-setInterval(purgeOtps, 10 * 60 * 1000)
+async function purgeExpiredPackages() {
+  try { await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()') } catch {}
+}
+setInterval(purgeOtps, 10 * 60 * 1000)          // cada 10 min
+setInterval(purgeExpiredPackages, 60 * 60 * 1000) // cada hora
 
+// Mail
 let smtpTransport = null
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   const portN = parseInt(SMTP_PORT || '587', 10)
@@ -204,16 +235,10 @@ async function sendMail(to, subject, text) {
   } catch (e) { console.warn('[MAIL] failed', e?.message || e) }
 }
 
+// Twilio
 let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-}
-function normalizePhone(p) {
-  if (!p) return ''
-  let s = String(p).replace(/[\s\-\(\)]/g, '')
-  if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
-  if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
-  return s
 }
 async function sendSmsOnly(rawTo, text) {
   const to = normalizePhone(rawTo)
@@ -226,7 +251,6 @@ async function sendSmsOnly(rawTo, text) {
 }
 
 // S3/R2
-const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
 let s3 = null
 if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
   s3 = new S3Client({
@@ -274,17 +298,21 @@ app.use(express.json({ limit: '2mb' }))
 
 // -------------------- Rate-limit OTP --------------------
 const otpLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: 8,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 5 * 60 * 1000, max: 8,
+  standardHeaders: true, legacyHeaders: false,
   skip: (req) => req.method === 'OPTIONS'
 })
 
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13r', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13s', channel: 'sms-only' }))
+
+app.get('/api/auth/whoami', (req, res) => {
+  const uid = authUid(req)
+  if (!uid) return res.status(401).json({ ok:false })
+  res.json({ ok:true, uid })
+})
 
 // Aliases sin /api
 app.post('/auth/register', (req, _res, next) => { req.url = '/api/auth/register'; next() })
@@ -294,13 +322,11 @@ app.post('/auth/verify', (req, _res, next) => { req.url = '/api/auth/verify-otp'
 // OTP: enviar
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
   try {
-    let { email, phone } = req.body || {}
-    email = email ? String(email).trim().toLowerCase() : ''
-    phone = phone ? String(phone).trim() : ''
-    const id = email || phone
+    const { email='', phone='' } = req.body || {}
+    const id = normalizeId(email, phone)
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
     const code = await createOtp(id)
-    if (email) await sendMail(email, 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
+    if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
     else await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
     res.json({ ok: true, msg: 'otp_sent' })
   } catch (e) { console.error('[register_failed]', e); res.status(500).json({ error: 'otp_send_failed' }) }
@@ -309,10 +335,8 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
 // OTP: verificar
 app.post('/api/auth/verify-otp', async (req, res) => {
   try {
-    let { email, phone, otp } = req.body || {}
-    email = email ? String(email).trim().toLowerCase() : ''
-    phone = phone ? String(phone).trim() : ''
-    const id = email || phone
+    const { email='', phone='', otp } = req.body || {}
+    const id = normalizeId(email, phone)
     if (!id || !otp) return res.status(400).json({ error: 'need_id_and_otp' })
 
     const ok = await verifyOtpDb(id, otp)
@@ -325,7 +349,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
          VALUES ($1,'FREE')
          ON CONFLICT (email) DO UPDATE SET updated_at=now()
          RETURNING id,email,phone,plan,plan_expires_at`,
-        [email]
+        [email.trim().toLowerCase()]
       )).rows[0]
     } else {
       row = (await pool.query(
@@ -333,7 +357,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
          VALUES ($1,'FREE')
          ON CONFLICT (phone) DO UPDATE SET updated_at=now()
          RETURNING id,email,phone,plan,plan_expires_at`,
-        [phone]
+        [normalizePhone(phone)]
       )).rows[0]
     }
     const token = signToken(row)
@@ -349,7 +373,10 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     const base = safeName(filename || `file-${Date.now()}`)
     const key  = `uploads/${new Date().toISOString().slice(0,10)}/${crypto.randomUUID()}-${base}`
 
-    const cmd = new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, ContentType: type })
+    const params = { Bucket: S3_BUCKET, Key: key, ContentType: type }
+    if (CONTENT_DISPOSITION) params.ContentDisposition = CONTENT_DISPOSITION
+
+    const cmd = new PutObjectCommand(params) // R2: no usar ACL
     const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 min
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
@@ -400,8 +427,8 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     )
 
     const sharePath = `/share/${pid}`
-    // CAMBIO: si FORCE_RELATIVE_URLS=true => siempre relativo
-    const url = (String(FORCE_RELATIVE_URLS).toLowerCase() === 'true')
+    const relative = String(FORCE_RELATIVE_URLS).toLowerCase() === 'true'
+    const url = relative
       ? sharePath
       : ((PUBLIC_BASE_URL || '') ? (PUBLIC_BASE_URL.replace(/\/+$/,'') + sharePath) : sharePath)
 
