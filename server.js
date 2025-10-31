@@ -1,5 +1,6 @@
-// Mixtli Transfer – Backend v2.13s (SMS-only + presign S3/R2 + Packages, URLs relativas)
-// OTP (Twilio) + CORS + RateLimit + Purga OTP/Paquetes + Debug + Presign + Paquetes
+// Mixtli Transfer — Backend v2.13t
+// SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes + S3/R2 presign + Packages
+// Por defecto, /api/pack/create devuelve URL **relativa**: "/share/:id"
 
 import 'dotenv/config'
 import express from 'express'
@@ -13,7 +14,7 @@ import crypto from 'crypto'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 
-// Fallback fetch (Node <=17)
+// --- Fallback fetch para Node <= 17 ---
 if (!globalThis.fetch) {
   const { default: nodeFetch } = await import('node-fetch')
   globalThis.fetch = nodeFetch
@@ -26,6 +27,7 @@ const {
   JWT_SECRET = 'change_me',
   OTP_TTL_MIN = '10',
 
+  // Email (opcional)
   SENDGRID_API_KEY,
   SENDGRID_FROM,
   SMTP_HOST,
@@ -49,10 +51,10 @@ const {
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
   S3_FORCE_PATH_STYLE = 'true', // en R2 => true
-  PUBLIC_BASE_URL,              // opcional (solo para links directos de archivos)
+  PUBLIC_BASE_URL,              // opcional (sólo para links directos de archivos)
   FORCE_RELATIVE_URLS = 'true', // default: siempre /share/:id
 
-  // Opcional: disposición sugerida para descarga
+  // Sugerir descarga directa
   CONTENT_DISPOSITION = ''      // ej: 'attachment'
 } = process.env
 
@@ -64,9 +66,7 @@ if (!DATABASE_URL) {
 // -------------------- DB --------------------
 const pool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } })
 
-async function safeExec(sql) {
-  try { await pool.query(sql) } catch (e) { /* noop */ }
-}
+async function safeExec(sql) { try { await pool.query(sql) } catch { /* noop */ } }
 
 async function initDb() {
   await safeExec('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
@@ -94,6 +94,7 @@ async function initDb() {
     );
   `)
 
+  // índices únicos condicionales para users
   await pool.query(`
   DO $$
   BEGIN
@@ -105,6 +106,7 @@ async function initDb() {
     END IF;
   END $$;`)
 
+  // paquetes
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -127,7 +129,6 @@ async function initDb() {
     );
   `)
 
-  // Índices útiles
   await safeExec(`CREATE INDEX IF NOT EXISTS package_files_pkg_idx ON package_files(package_id);`)
   await safeExec(`CREATE INDEX IF NOT EXISTS packages_expires_idx ON packages(expires_at);`)
 
@@ -147,7 +148,6 @@ function normalizePhone(p) {
   if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
 }
-
 function normalizeId(email, phone) {
   const em = (email || '').trim().toLowerCase()
   const ph = normalizePhone(phone || '')
@@ -200,7 +200,9 @@ async function purgeOtps() {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') } catch {}
 }
 async function purgeExpiredPackages() {
-  try { await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()') } catch {}
+  try {
+    await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()')
+  } catch {}
 }
 setInterval(purgeOtps, 10 * 60 * 1000)          // cada 10 min
 setInterval(purgeExpiredPackages, 60 * 60 * 1000) // cada hora
@@ -278,7 +280,7 @@ function isNetlifyPreview(origin) {
 }
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true)
+    if (!o) return cb(null, true) // curl/Postman/SSR
     if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
@@ -294,7 +296,7 @@ app.use((req,res,next)=>corsMw(req,res,(err)=>{
 }))
 app.options('*', corsMw)
 app.set('trust proxy', 1)
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit: '4mb' })) // un poco más holgado para metadatos
 
 // -------------------- Rate-limit OTP --------------------
 const otpLimiter = rateLimit({
@@ -306,7 +308,7 @@ const otpLimiter = rateLimit({
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13s', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13t', channel: 'sms-only' }))
 
 app.get('/api/auth/whoami', (req, res) => {
   const uid = authUid(req)
@@ -327,9 +329,12 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
     const code = await createOtp(id)
     if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
-    else await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
+    else        await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
     res.json({ ok: true, msg: 'otp_sent' })
-  } catch (e) { console.error('[register_failed]', e); res.status(500).json({ error: 'otp_send_failed' }) }
+  } catch (e) {
+    console.error('[register_failed]', e)
+    res.status(500).json({ error: 'otp_send_failed' })
+  }
 })
 
 // OTP: verificar
@@ -362,7 +367,10 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     }
     const token = signToken(row)
     res.json({ token, user: row })
-  } catch (e) { console.error('[verify_failed]', e); res.status(500).json({ error: 'verify_failed' }) }
+  } catch (e) {
+    console.error('[verify_failed]', e)
+    res.status(500).json({ error: 'verify_failed' })
+  }
 })
 
 // -------------------- Presign S3/R2 --------------------
@@ -390,7 +398,10 @@ app.post('/api/complete', requireAuth, async (req, res) => {
     const { key } = req.body || {}
     if (!key) return res.status(400).json({ error: 'key_required' })
     res.json({ ok: true, publicUrl: await buildPublicUrl(key) })
-  } catch (e) { console.error('[complete_failed]', e); res.status(500).json({ error: 'complete_failed' }) }
+  } catch (e) {
+    console.error('[complete_failed]', e)
+    res.status(500).json({ error: 'complete_failed' })
+  }
 })
 
 // -------------------- PACKAGES --------------------
@@ -401,7 +412,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'no_files' })
     }
     const ttl = Math.min(Math.max(parseInt(ttlDays || 30, 10), 1), 180)
-    const totalSize = files.reduce((a, f) => a + (f.size || 0), 0)
+    const totalSize = files.reduce((a, f) => a + (Number(f.size) || 0), 0)
 
     const r = await pool.query(
       `INSERT INTO packages (owner_uid, title, total_size, expires_at)
@@ -415,7 +426,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     const values = []
     const params = []
     files.forEach(f => {
-      params.push(pid, f.key, f.name || null, f.size || 0, f.type || null)
+      params.push(pid, f.key, f.name || null, Number(f.size) || 0, f.type || null)
       values.push(
         `($${params.length-4},$${params.length-3},$${params.length-2},$${params.length-1},$${params.length})`
       )
@@ -439,7 +450,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
   }
 })
 
-// JSON del paquete
+// JSON del paquete (para previews/embeds)
 app.get('/api/pack/:id', async (req, res) => {
   try {
     const id = req.params.id
@@ -452,14 +463,17 @@ app.get('/api/pack/:id', async (req, res) => {
     const files = await Promise.all(
       f.rows.map(async r => ({
         name: r.filename || 'file',
-        size: r.size,
+        size: Number(r.size) || 0,
         type: r.content_type,
         url: await buildPublicUrl(r.key)
       }))
     )
-    res.json({ id, title: p.rows[0].title, total_size: p.rows[0].total_size,
+    res.json({ id, title: p.rows[0].title, total_size: Number(p.rows[0].total_size) || 0,
       expires_at: p.rows[0].expires_at, files })
-  } catch (e) { res.status(500).json({ error: 'pack_fetch_failed' }) }
+  } catch (e) {
+    console.error('[pack_fetch_failed]', e)
+    res.status(500).json({ error: 'pack_fetch_failed' })
+  }
 })
 
 // Página pública simple de descarga
@@ -474,20 +488,23 @@ app.get('/share/:id', async (req, res) => {
     )
     const items = await Promise.all(f.rows.map(async r => {
       const url = await buildPublicUrl(r.key)
-      const name = r.filename || 'file'
+      const name = (r.filename || 'file').replace(/</g,'&lt;').replace(/>/g,'&gt;')
       const mb = (Number(r.size||0)/1048576).toFixed(2)
       return `<li><a href="${url}" target="_blank" rel="noopener">${name}</a> — ${mb} MB</li>`
     }))
 
     res.type('html').send(`<!doctype html><meta charset="utf-8">
-      <title>${p.rows[0].title || 'Descargas'}</title>
+      <title>${(p.rows[0].title || 'Descargas').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</title>
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <div style="font-family:system-ui;padding:24px;max-width:820px;margin:auto;color:#e5e7eb;background:#0b0f17">
-        <h1 style="margin:0 0 8px;font-size:28px;color:#fff">${p.rows[0].title || 'Descargas'}</h1>
+        <h1 style="margin:0 0 8px;font-size:28px;color:#fff">${(p.rows[0].title || 'Descargas').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</h1>
         <p style="margin:0 0 16px;color:#9ca3af">Expira: ${p.rows[0].expires_at}</p>
         <ul style="line-height:1.9">${items.join('')}</ul>
       </div>`)
-  } catch (e) { res.status(500).type('text/plain').send('Error interno') }
+  } catch (e) {
+    console.error('[share_render_failed]', e)
+    res.status(500).type('text/plain').send('Error interno')
+  }
 })
 
 // -------------------- Debug --------------------
