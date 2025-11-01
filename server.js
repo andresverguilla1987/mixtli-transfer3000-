@@ -1,7 +1,7 @@
-// Mixtli Transfer — Backend v2.14
+// Mixtli Transfer — Backend v2.14r
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
 // S3/R2 presign + Packages + ZIP por streaming
-// Por defecto, /api/pack/create devuelve URL **relativa**: "/share/:id"
+// /api/pack/create devuelve URL **relativa**: "/share/:id"
 
 import 'dotenv/config'
 import express from 'express'
@@ -12,11 +12,12 @@ import nodemailer from 'nodemailer'
 import twilio from 'twilio'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
+import { Readable } from 'node:stream'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
-import Archiver from 'archiver'
+import archiver from 'archiver'
 
-// --- Fallback fetch para Node <= 17 ---
+// Fallback fetch (Node <=17)
 if (!globalThis.fetch) {
   const { default: nodeFetch } = await import('node-fetch')
   globalThis.fetch = nodeFetch
@@ -53,8 +54,8 @@ const {
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
   S3_FORCE_PATH_STYLE = 'true', // en R2 => true
-  PUBLIC_BASE_URL,              // opcional (sólo para links directos de archivos)
-  FORCE_RELATIVE_URLS = 'true', // default: siempre /share/:id
+  PUBLIC_BASE_URL,              // opcional (solo para links directos de archivos)
+  FORCE_RELATIVE_URLS = 'true', // default: /share/:id
 
   // Sugerir descarga directa
   CONTENT_DISPOSITION = ''      // ej: 'attachment'
@@ -96,7 +97,6 @@ async function initDb() {
     );
   `)
 
-  // índices únicos condicionales para users
   await pool.query(`
   DO $$
   BEGIN
@@ -108,7 +108,6 @@ async function initDb() {
     END IF;
   END $$;`)
 
-  // paquetes
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -198,16 +197,12 @@ function requireAuth(req, res, next) {
   next()
 }
 
-async function purgeOtps() {
-  try { await pool.query('DELETE FROM otps WHERE exp < now()') } catch {}
-}
+async function purgeOtps() { try { await pool.query('DELETE FROM otps WHERE exp < now()') } catch {} }
 async function purgeExpiredPackages() {
-  try {
-    await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()')
-  } catch {}
+  try { await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()') } catch {}
 }
-setInterval(purgeOtps, 10 * 60 * 1000)            // cada 10 min
-setInterval(purgeExpiredPackages, 60 * 60 * 1000) // cada hora
+setInterval(purgeOtps, 10 * 60 * 1000)
+setInterval(purgeExpiredPackages, 60 * 60 * 1000)
 
 // Mail
 let smtpTransport = null
@@ -259,7 +254,7 @@ let s3 = null
 if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
   s3 = new S3Client({
     region: S3_REGION,
-    endpoint: S3_ENDPOINT, // sin /<bucket>
+    endpoint: S3_ENDPOINT,
     credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
     forcePathStyle: FORCE_PATH
   })
@@ -282,7 +277,7 @@ function isNetlifyPreview(origin) {
 }
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true) // curl/Postman/SSR
+    if (!o) return cb(null, true)
     if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
@@ -290,7 +285,7 @@ const corsMw = cors({
   allowedHeaders: ['Content-Type','Authorization','x-admin-token','x-cron-token','x-mixtli-token'],
   optionsSuccessStatus: 204
 })
-app.use((req,res,next)=>corsMw(req,res,(err)=>{
+app.use((req,res,next)=>corsMw(req,res,(err)=> {
   if (err?.message === 'origin_not_allowed') {
     return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
   }
@@ -298,7 +293,7 @@ app.use((req,res,next)=>corsMw(req,res,(err)=>{
 }))
 app.options('*', corsMw)
 app.set('trust proxy', 1)
-app.use(express.json({ limit: '4mb' })) // holgado para metadatos
+app.use(express.json({ limit: '4mb' }))
 
 // -------------------- Rate-limit OTP --------------------
 const otpLimiter = rateLimit({
@@ -310,7 +305,7 @@ const otpLimiter = rateLimit({
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14r', channel: 'sms-only' }))
 
 app.get('/api/auth/whoami', (req, res) => {
   const uid = authUid(req)
@@ -318,10 +313,13 @@ app.get('/api/auth/whoami', (req, res) => {
   res.json({ ok:true, uid })
 })
 
-// Aliases sin /api
-app.post('/auth/register', (req, _res, next) => { req.url = '/api/auth/register'; next() })
+// ---- ALIAS sin /api (para compat front) ----
+app.post('/auth/register',   (req, _res, next) => { req.url = '/api/auth/register';   next() })
 app.post('/auth/verify-otp', (req, _res, next) => { req.url = '/api/auth/verify-otp'; next() })
-app.post('/auth/verify', (req, _res, next) => { req.url = '/api/auth/verify-otp'; next() })
+app.post('/auth/verify',     (req, _res, next) => { req.url = '/api/auth/verify-otp'; next() })
+app.post('/presign',         (req, _res, next) => { req.url = '/api/presign';         next() })
+app.post('/complete',        (req, _res, next) => { req.url = '/api/complete';        next() })
+app.post('/pack/create',     (req, _res, next) => { req.url = '/api/pack/create';     next() })
 
 // OTP: enviar
 app.post('/api/auth/register', otpLimiter, async (req, res) => {
@@ -331,12 +329,9 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
     const code = await createOtp(id)
     if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
-    else        await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
+    else       await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
     res.json({ ok: true, msg: 'otp_sent' })
-  } catch (e) {
-    console.error('[register_failed]', e)
-    res.status(500).json({ error: 'otp_send_failed' })
-  }
+  } catch (e) { console.error('[register_failed]', e); res.status(500).json({ error: 'otp_send_failed' }) }
 })
 
 // OTP: verificar
@@ -369,10 +364,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     }
     const token = signToken(row)
     res.json({ token, user: row })
-  } catch (e) {
-    console.error('[verify_failed]', e)
-    res.status(500).json({ error: 'verify_failed' })
-  }
+  } catch (e) { console.error('[verify_failed]', e); res.status(500).json({ error: 'verify_failed' }) }
 })
 
 // -------------------- Presign S3/R2 --------------------
@@ -386,8 +378,8 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     const params = { Bucket: S3_BUCKET, Key: key, ContentType: type }
     if (CONTENT_DISPOSITION) params.ContentDisposition = CONTENT_DISPOSITION
 
-    const cmd = new PutObjectCommand(params) // R2: no usar ACL
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 min
+    const cmd = new PutObjectCommand(params) // R2: no ACL
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 })
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
     console.error('[presign_failed]', e)
@@ -400,10 +392,7 @@ app.post('/api/complete', requireAuth, async (req, res) => {
     const { key } = req.body || {}
     if (!key) return res.status(400).json({ error: 'key_required' })
     res.json({ ok: true, publicUrl: await buildPublicUrl(key) })
-  } catch (e) {
-    console.error('[complete_failed]', e)
-    res.status(500).json({ error: 'complete_failed' })
-  }
+  } catch (e) { console.error('[complete_failed]', e); res.status(500).json({ error: 'complete_failed' }) }
 })
 
 // -------------------- PACKAGES --------------------
@@ -446,21 +435,17 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
       : ((PUBLIC_BASE_URL || '') ? (PUBLIC_BASE_URL.replace(/\/+$/,'') + sharePath) : sharePath)
 
     res.json({ ok: true, id: pid, url, expires_at: r.rows[0].expires_at })
-  } catch (e) {
-    console.error('[pack_create_failed]', e)
-    res.status(500).json({ error: 'pack_create_failed' })
-  }
+  } catch (e) { console.error('[pack_create_failed]', e); res.status(500).json({ error: 'pack_create_failed' }) }
 })
 
-// JSON del paquete (para previews/embeds)
+// JSON del paquete
 app.get('/api/pack/:id', async (req, res) => {
   try {
     const id = req.params.id
     const p = await pool.query('SELECT * FROM packages WHERE id=$1', [id])
     if (!p.rows.length) return res.status(404).json({ error: 'not_found' })
     const f = await pool.query(
-      `SELECT key, filename, size, content_type FROM package_files
-       WHERE package_id=$1 ORDER BY id`, [id]
+      `SELECT key, filename, size, content_type FROM package_files WHERE package_id=$1 ORDER BY id`, [id]
     )
     const files = await Promise.all(
       f.rows.map(async r => ({
@@ -478,13 +463,10 @@ app.get('/api/pack/:id', async (req, res) => {
       files,
       zip_url: `/api/pack/${id}/zip`
     })
-  } catch (e) {
-    console.error('[pack_fetch_failed]', e)
-    res.status(500).json({ error: 'pack_fetch_failed' })
-  }
+  } catch (e) { console.error('[pack_fetch_failed]', e); res.status(500).json({ error: 'pack_fetch_failed' }) }
 })
 
-// Página pública simple de descarga
+// Página pública simple
 app.get('/share/:id', async (req, res) => {
   try {
     const id = req.params.id
@@ -510,10 +492,7 @@ app.get('/share/:id', async (req, res) => {
         <p><a href="/api/pack/${id}/zip" style="display:inline-block;padding:8px 12px;background:#34d399;color:#001;border-radius:8px;text-decoration:none">Descargar todo (ZIP)</a></p>
         <ul style="line-height:1.9">${items.join('')}</ul>
       </div>`)
-  } catch (e) {
-    console.error('[share_render_failed]', e)
-    res.status(500).type('text/plain').send('Error interno')
-  }
+  } catch (e) { console.error('[share_render_failed]', e); res.status(500).type('text/plain').send('Error interno') }
 })
 
 // -------------------- ZIP del paquete (streaming) --------------------
@@ -524,8 +503,7 @@ app.get('/api/pack/:id/zip', async (req, res) => {
     if (!p.rows.length) return res.status(404).json({ error: 'not_found' })
 
     const f = await pool.query(
-      'SELECT key, filename, size FROM package_files WHERE package_id=$1 ORDER BY id',
-      [id]
+      'SELECT key, filename, size FROM package_files WHERE package_id=$1 ORDER BY id', [id]
     )
     if (!f.rows.length) return res.status(400).json({ error: 'empty_package' })
 
@@ -533,7 +511,7 @@ app.get('/api/pack/:id/zip', async (req, res) => {
     res.setHeader('Content-Type', 'application/zip')
     res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`)
 
-    const archive = Archiver('zip', { zlib: { level: 9 } })
+    const archive = archiver('zip', { zlib: { level: 9 } })
     archive.on('error', err => { console.error('[ZIP]', err); try { res.status(500).end() } catch {} })
     archive.pipe(res)
 
@@ -541,18 +519,16 @@ app.get('/api/pack/:id/zip', async (req, res) => {
       const url = await buildPublicUrl(row.key)
       const name = (row.filename || 'file').replace(/[\/\\]/g, '_')
       const r = await fetch(url)
-      if (!r.ok || !r.body) {
-        console.warn('[ZIP:skip]', url, r.status)
-        continue
-      }
-      archive.append(r.body, { name })
+      if (!r.ok || !r.body) { console.warn('[ZIP:skip]', url, r.status); continue }
+      // Node18 fetch -> web ReadableStream: convertir a Node stream
+      const nodeStream = (typeof Readable.fromWeb === 'function' && r.body?.getReader)
+        ? Readable.fromWeb(r.body)
+        : r.body
+      archive.append(nodeStream, { name })
     }
 
     await archive.finalize()
-  } catch (e) {
-    console.error('[pack_zip_failed]', e)
-    res.status(500).json({ error: 'pack_zip_failed' })
-  }
+  } catch (e) { console.error('[pack_zip_failed]', e); res.status(500).json({ error: 'pack_zip_failed' }) }
 })
 
 // -------------------- Debug --------------------
@@ -582,7 +558,7 @@ app.get('/api/debug/origins', (req, res) =>
 
 // Error global
 app.use((err,_req,res,_next)=>{
-  console.error('[ERR]', err?.message || err)
+  console.error('[ERR]', err?.stack || err?.message || err)
   res.status(500).json({ error: 'internal_error', detail: String(err?.message || err) })
 })
 
