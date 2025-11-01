@@ -1,7 +1,7 @@
-// Mixtli Transfer — Backend v2.14 FINAL
+// Mixtli Transfer — Backend v2.14.1
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
 // S3/R2 presign + Packages + ZIP por streaming
-// Por defecto, /api/pack/create devuelve URL **relativa**: "/share/:id"
+// /api/pack/create devuelve URL **relativa**: "/share/:id"
 
 import 'dotenv/config'
 import express from 'express'
@@ -14,7 +14,7 @@ import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
-import Archiver from 'archiver'
+import archiver from 'archiver'
 
 // --- Fallback fetch para Node <= 17 ---
 if (!globalThis.fetch) {
@@ -145,15 +145,24 @@ function rand6() { return String(Math.floor(100000 + Math.random() * 900000)) }
 
 function normalizePhone(p) {
   if (!p) return ''
-  let s = String(p).trim().replace(/[\s\\-\\(\\)]/g, '')
+  let s = String(p).trim().replace(/[\s\-\(\)]/g, '')
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
-  if (!s.startsWith('+') && /^\\d{10,15}$/.test(s)) s = '+' + s
+  if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
 }
 function normalizeId(email, phone) {
   const em = (email || '').trim().toLowerCase()
   const ph = normalizePhone(phone || '')
   return em || ph
+}
+
+// safeName robusto (sin rangos inválidos; elimina acentos)
+function safeName(name = '') {
+  return String(name)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '_') // guion al final
+    .slice(0, 180)
 }
 
 async function createOtp(key) {
@@ -261,16 +270,14 @@ if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
     region: S3_REGION,
     endpoint: S3_ENDPOINT, // sin /<bucket>
     credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
-    forcePathStyle: String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
+    forcePathStyle: FORCE_PATH
   })
 }
-function safeName(name = '') { return name.replace(/[^\\w\\-.]+/g, '_').slice(0, 180) }
 async function buildPublicUrl(key) {
-  if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\\/+$/,'')}/${key}`
-  const host = S3_ENDPOINT.replace(/^https?:\\/\\//, '').replace(/\\/+$/,'')
-  const forcePath = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
-  return forcePath
-    ? `${S3_ENDPOINT.replace(/\\/+$/,'')}/${S3_BUCKET}/${key}`
+  if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/+$/,'')}/${key}`
+  const host = S3_ENDPOINT.replace(/^https?:\/\//, '').replace(/\/+$/,'')
+  return FORCE_PATH
+    ? `${S3_ENDPOINT.replace(/\/+$/,'')}/${S3_BUCKET}/${key}`
     : `https://${S3_BUCKET}.${host}/${key}`
 }
 
@@ -279,7 +286,7 @@ const app = express()
 let ORIGINS = []
 try { ORIGINS = JSON.parse(ALLOWED_ORIGINS) } catch {}
 function isNetlifyPreview(origin) {
-  try { return /\\.netlify\\.app$/i.test(new URL(origin).hostname) } catch { return false }
+  try { return /\.netlify\.app$/i.test(new URL(origin).hostname) } catch { return false }
 }
 const corsMw = cors({
   origin: (o, cb) => {
@@ -299,7 +306,7 @@ app.use((req,res,next)=>corsMw(req,res,(err)=>{
 }))
 app.options('*', corsMw)
 app.set('trust proxy', 1)
-app.use(express.json({ limit: '4mb' })) // holgado para metadatos
+app.use(express.json({ limit: '4mb' }))
 
 // -------------------- Rate-limit OTP --------------------
 const otpLimiter = rateLimit({
@@ -311,7 +318,7 @@ const otpLimiter = rateLimit({
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.1', channel: 'sms-only' }))
 
 app.get('/api/auth/whoami', (req, res) => {
   const uid = authUid(req)
@@ -331,7 +338,7 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
     const id = normalizeId(email, phone)
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
     const code = await createOtp(id)
-    if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\\nExpira en ${ttlMin} minutos.`)
+    if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
     else        await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
     res.json({ ok: true, msg: 'otp_sent' })
   } catch (e) {
@@ -444,7 +451,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     const relative = String(FORCE_RELATIVE_URLS).toLowerCase() === 'true'
     const url = relative
       ? sharePath
-      : ((PUBLIC_BASE_URL || '') ? (PUBLIC_BASE_URL.replace(/\\/+$/,'') + sharePath) : sharePath)
+      : ((PUBLIC_BASE_URL || '') ? (PUBLIC_BASE_URL.replace(/\/+$/,'') + sharePath) : sharePath)
 
     res.json({ ok: true, id: pid, url, expires_at: r.rows[0].expires_at })
   } catch (e) {
@@ -530,17 +537,17 @@ app.get('/api/pack/:id/zip', async (req, res) => {
     )
     if (!f.rows.length) return res.status(400).json({ error: 'empty_package' })
 
-    const zipName = `${(p.rows[0].title || 'mixtli').replace(/[^\\w\\-]+/g,'_') || 'mixtli'}.zip`
+    const zipName = `${(p.rows[0].title || 'mixtli').replace(/[^\w-]+/g,'_') || 'mixtli'}.zip`
     res.setHeader('Content-Type', 'application/zip')
     res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`)
 
-    const archive = Archiver('zip', { zlib: { level: 9 } })
+    const archive = archiver('zip', { zlib: { level: 9 } })
     archive.on('error', err => { console.error('[ZIP]', err); try { res.status(500).end() } catch {} })
     archive.pipe(res)
 
     for (const row of f.rows) {
       const url = await buildPublicUrl(row.key)
-      const name = (row.filename || 'file').replace(/[\\/\\\\]/g, '_')
+      const name = (row.filename || 'file').replace(/[\/\\]/g, '_')
       const r = await fetch(url)
       if (!r.ok || !r.body) {
         console.warn('[ZIP:skip]', url, r.status)
