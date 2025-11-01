@@ -1,1 +1,1 @@
-web: node --enable-source-maps server.js
+web: node server.js

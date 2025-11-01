@@ -1,30 +1,35 @@
-# Mixtli Transfer — Netlify Patch (Routing Only)
+# Mixtli Backend v2.14 (FINAL)
 
-This patch **does not change your UI**. It only fixes routing so that
-`/share/:id` resolves on Netlify and API calls keep working.
+Node/Express + Postgres + Twilio + R2/S3 presign + paquetes y ZIP streaming.
 
-## What this adds
-- `_redirects` file to:
-  - Proxy `/api/*` (and `/auth/*` if needed) to your Render backend.
-  - Serve `/share/:id` from your SPA (`index.html`) to avoid Netlify 404.
-  - Optionally fallback all other client routes to SPA.
+## Deploy rápido (Render)
+1. Crear **Web Service** en Render (Node 18+).
+2. Variables de entorno (copiar `.env.example`):
+   - `DATABASE_URL` (Postgres con SSL)
+   - `JWT_SECRET`
+   - `ALLOWED_ORIGINS` (JSON array con tu Netlify y localhost)
+   - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION=auto`,
+     `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE=true`
+   - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` (opcional para SMS)
+   - `PUBLIC_BASE_URL` (opcional para links directos de archivos; no afecta `/share/:id`)
+3. Build Command: `npm install --no-audit --no-fund`
+4. Start Command: `node server.js`
+5. Probar `GET /api/health`.
 
-## How to apply
-1. In your Netlify site, make sure the **publish directory** is `public/`.
-2. Drop the included `_redirects` file into your repo/site root **or** into `public/`.
-   (Either location works; Netlify will pick it up. Prefer the site root.)
-3. Set these environment variables in Netlify → Site settings → Build & deploy → Environment:
-   - `APP_BASE_URL = https://mixtli-transfer3000.onrender.com`
-   - (Optional) `PUBLIC_BASE_URL` — *leave empty*, the backend builds public file URLs.
-4. Redeploy the site (Trigger deploy).
+## Endpoints clave
+- `POST /api/auth/register` (email o phone) → envía OTP
+- `POST /api/auth/verify-otp` → token JWT
+- `POST /api/presign` (JWT) → URL PUT a R2/S3
+- `POST /api/complete` (JWT) → regresa publicUrl
+- `POST /api/pack/create` (JWT) → crea paquete y entrega URL **relativa** `/share/:id`
+- `GET  /share/:id` → HTML público simple
+- `GET  /api/pack/:id/zip` → ZIP por streaming de archivos del paquete
+- `GET  /api/health`
 
-## Smoke check
-- Visit `/` (home) → generate a package → you should obtain a link like:
-  `https://<your-netlify-site>.netlify.app/share/<package-id>`
-- Open it in a private window; it should render the SPA, fetch package JSON from:
-  `/api/pack/:id` (proxied to Render) and show individual file links.
-
-## Notes
-- If you keep a `netlify.toml`, do not duplicate routing rules there; `_redirects` wins.
-- Backend must expose: `/api/pack/create`, `/api/pack/:id`, `/share/:id` (optional server html),
-  and presign endpoints. Your current backend already supports these routes.
+## Notas
+- Para Netlify, usa `_redirects` en el **frontend**:
+  ```
+  /api/*   https://<tu-backend>.onrender.com/api/:splat   200
+  /share/* https://<tu-backend>.onrender.com/share/:splat 200
+  ```
+- La página `/share/:id` siempre la sirve **el backend** (no el frontend), por eso se proxya.
