@@ -1,7 +1,9 @@
 {
   "name": "mixtli-backend",
-  "version": "2.14.0",
+  "version": "2.14.1",
+  "private": true,
   "type": "module",
+  "main": "server.js",
   "engines": {
     "node": ">=18"
   },
@@ -20,6 +22,7 @@
     "node-fetch": "^3.3.2"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:prod": "NODE_ENV=production node server.js"
   }
 }
