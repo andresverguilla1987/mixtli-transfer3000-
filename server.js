@@ -1,5 +1,6 @@
-// Mixtli Transfer — Backend v2.13t
-// SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes + S3/R2 presign + Packages
+// Mixtli Transfer — Backend v2.14
+// SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
+// S3/R2 presign + Packages + ZIP por streaming
 // Por defecto, /api/pack/create devuelve URL **relativa**: "/share/:id"
 
 import 'dotenv/config'
@@ -13,6 +14,7 @@ import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
+import Archiver from 'archiver'
 
 // --- Fallback fetch para Node <= 17 ---
 if (!globalThis.fetch) {
@@ -204,7 +206,7 @@ async function purgeExpiredPackages() {
     await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()')
   } catch {}
 }
-setInterval(purgeOtps, 10 * 60 * 1000)          // cada 10 min
+setInterval(purgeOtps, 10 * 60 * 1000)            // cada 10 min
 setInterval(purgeExpiredPackages, 60 * 60 * 1000) // cada hora
 
 // Mail
@@ -296,7 +298,7 @@ app.use((req,res,next)=>corsMw(req,res,(err)=>{
 }))
 app.options('*', corsMw)
 app.set('trust proxy', 1)
-app.use(express.json({ limit: '4mb' })) // un poco más holgado para metadatos
+app.use(express.json({ limit: '4mb' })) // holgado para metadatos
 
 // -------------------- Rate-limit OTP --------------------
 const otpLimiter = rateLimit({
@@ -308,7 +310,7 @@ const otpLimiter = rateLimit({
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.13t', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14', channel: 'sms-only' }))
 
 app.get('/api/auth/whoami', (req, res) => {
   const uid = authUid(req)
@@ -468,8 +470,14 @@ app.get('/api/pack/:id', async (req, res) => {
         url: await buildPublicUrl(r.key)
       }))
     )
-    res.json({ id, title: p.rows[0].title, total_size: Number(p.rows[0].total_size) || 0,
-      expires_at: p.rows[0].expires_at, files })
+    res.json({
+      id,
+      title: p.rows[0].title,
+      total_size: Number(p.rows[0].total_size) || 0,
+      expires_at: p.rows[0].expires_at,
+      files,
+      zip_url: `/api/pack/${id}/zip`
+    })
   } catch (e) {
     console.error('[pack_fetch_failed]', e)
     res.status(500).json({ error: 'pack_fetch_failed' })
@@ -499,11 +507,51 @@ app.get('/share/:id', async (req, res) => {
       <div style="font-family:system-ui;padding:24px;max-width:820px;margin:auto;color:#e5e7eb;background:#0b0f17">
         <h1 style="margin:0 0 8px;font-size:28px;color:#fff">${(p.rows[0].title || 'Descargas').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</h1>
         <p style="margin:0 0 16px;color:#9ca3af">Expira: ${p.rows[0].expires_at}</p>
+        <p><a href="/api/pack/${id}/zip" style="display:inline-block;padding:8px 12px;background:#34d399;color:#001;border-radius:8px;text-decoration:none">Descargar todo (ZIP)</a></p>
         <ul style="line-height:1.9">${items.join('')}</ul>
       </div>`)
   } catch (e) {
     console.error('[share_render_failed]', e)
     res.status(500).type('text/plain').send('Error interno')
+  }
+})
+
+// -------------------- ZIP del paquete (streaming) --------------------
+app.get('/api/pack/:id/zip', async (req, res) => {
+  try {
+    const id = req.params.id
+    const p = await pool.query('SELECT * FROM packages WHERE id=$1', [id])
+    if (!p.rows.length) return res.status(404).json({ error: 'not_found' })
+
+    const f = await pool.query(
+      'SELECT key, filename, size FROM package_files WHERE package_id=$1 ORDER BY id',
+      [id]
+    )
+    if (!f.rows.length) return res.status(400).json({ error: 'empty_package' })
+
+    const zipName = `${(p.rows[0].title || 'mixtli').replace(/[^\w\-]+/g,'_') || 'mixtli'}.zip`
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`)
+
+    const archive = Archiver('zip', { zlib: { level: 9 } })
+    archive.on('error', err => { console.error('[ZIP]', err); try { res.status(500).end() } catch {} })
+    archive.pipe(res)
+
+    for (const row of f.rows) {
+      const url = await buildPublicUrl(row.key)
+      const name = (row.filename || 'file').replace(/[\/\\]/g, '_')
+      const r = await fetch(url)
+      if (!r.ok || !r.body) {
+        console.warn('[ZIP:skip]', url, r.status)
+        continue
+      }
+      archive.append(r.body, { name })
+    }
+
+    await archive.finalize()
+  } catch (e) {
+    console.error('[pack_zip_failed]', e)
+    res.status(500).json({ error: 'pack_zip_failed' })
   }
 })
 
