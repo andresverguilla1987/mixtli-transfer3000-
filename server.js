@@ -1,6 +1,6 @@
-// Mixtli Transfer — Backend v2.14.4-lock
+// Mixtli Transfer — Backend v2.14.5-lock
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
-// S3/R2 presign + Packages + ZIP por streaming
+// S3/R2 presign + Packages + ZIP por streaming (SDK GetObject + fallback fetch->NodeStream)
 // /api/pack/create devuelve URL relativa: "/share/:id"
 
 import 'dotenv/config'
@@ -12,9 +12,10 @@ import nodemailer from 'nodemailer'
 import twilio from 'twilio'
 import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import archiver from 'archiver'
+import { Readable } from 'stream'
 
 // --- Fallback fetch para Node <= 17 ---
 if (!globalThis.fetch) {
@@ -27,23 +28,19 @@ const EXPECTED = {
   NODE_ENV: ['production'],
   JWT_SECRET: 'present',
   DATABASE_URL: 'present',
-
   // S3/R2 obligatorias
   S3_ENDPOINT: 'present',
   S3_BUCKET: 'present',
   S3_ACCESS_KEY_ID: 'present',
   S3_SECRET_ACCESS_KEY: 'present',
-  S3_FORCE_PATH_STYLE: ['true'],   // R2 => true
-
+  S3_FORCE_PATH_STYLE: ['true'], // R2 => true
   // CORS como JSON array no vacío
   ALLOWED_ORIGINS: 'json-array-nonempty',
-
   // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID: 'present',
   TWILIO_AUTH_TOKEN: 'present',
   TWILIO_FROM: 'present',
-
-  // Fix ZIP: origin público del backend
+  // Fix ZIP: origin público del backend (Render)
   BACKEND_PUBLIC_ORIGIN: 'present'
 }
 function assertEnv () {
@@ -112,7 +109,7 @@ const {
   // Token para /api/diag
   CONFIG_DIAG_TOKEN = '',
 
-  // 👇 NUEVO: para bypassear Netlify en ZIP
+  // Para bypassear Netlify en ZIP
   BACKEND_PUBLIC_ORIGIN
 } = process.env
 
@@ -211,6 +208,11 @@ function safeName (name = '') {
     .replace(/[^A-Za-z0-9._-]+/g, '_')
     .slice(0, 180)
 }
+
+function sanitizeEndpoint (ep) { return String(ep || '').replace(/\/+$/,'') }
+function sanitizeOrigin (o) { return String(o || '').replace(/\/+$/,'') }
+
+const BACKEND_ORIGIN = sanitizeOrigin(BACKEND_PUBLIC_ORIGIN)
 
 async function createOtp (key) {
   const code = rand6()
@@ -320,11 +322,6 @@ if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
     forcePathStyle: FORCE_PATH
   })
 }
-function sanitizeEndpoint (ep) { return String(ep || '').replace(/\/+$/,'') }
-function sanitizeOrigin (o) { return String(o || '').replace(/\/+$/,'') }
-
-const BACKEND_ORIGIN = sanitizeOrigin(BACKEND_PUBLIC_ORIGIN)
-
 async function buildPublicUrl (key) {
   if (PUBLIC_BASE_URL) return `${sanitizeEndpoint(PUBLIC_BASE_URL)}/${key}`
   const endpoint = sanitizeEndpoint(S3_ENDPOINT)
@@ -333,10 +330,18 @@ async function buildPublicUrl (key) {
     ? `${endpoint}/${S3_BUCKET}/${key}`
     : `https://${S3_BUCKET}.${host}/${key}`
 }
-
 // URL absoluta al ZIP en backend (evita proxy Netlify)
 function absoluteZipUrl (id) {
   return `${BACKEND_ORIGIN}/api/pack/${id}/zip`
+}
+
+// Convierte Web ReadableStream → Node stream (Node 18+)
+function asNodeStream(body) {
+  if (!body) return null
+  if (typeof Readable.fromWeb === 'function' && body?.getReader) {
+    try { return Readable.fromWeb(body) } catch { /* ignore */ }
+  }
+  return body
 }
 
 /* -------------------- App / CORS -------------------- */
@@ -376,7 +381,7 @@ const otpLimiter = rateLimit({
 /* -------------------- Rutas base -------------------- */
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.4-lock', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.5-lock', channel: 'sms-only' }))
 app.head('/api/health', (_req, res) => res.status(200).end())
 
 // Diag
@@ -386,7 +391,7 @@ app.get('/api/diag', (req, res) => {
   res.json({
     ok: true,
     node: process.version,
-    ver: '2.14.4-lock',
+    ver: '2.14.5-lock',
     cors_origins: ORIGINS,
     force_path: String(S3_FORCE_PATH_STYLE),
     public_base: !!PUBLIC_BASE_URL,
@@ -470,8 +475,8 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     const params = { Bucket: S3_BUCKET, Key: key, ContentType: type }
     if (CONTENT_DISPOSITION) params.ContentDisposition = CONTENT_DISPOSITION
 
-    const cmd = new PutObjectCommand(params)
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 })
+    const cmd = new PutObjectCommand(params) // R2 sin ACL
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 min
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
     console.error('[presign_failed]', e)
@@ -601,7 +606,7 @@ app.get('/share/:id', async (req, res) => {
   }
 })
 
-// ZIP del paquete (streaming)
+// ZIP del paquete (streaming robusto)
 app.get('/api/pack/:id/zip', async (req, res) => {
   try {
     const id = req.params.id
@@ -623,11 +628,33 @@ app.get('/api/pack/:id/zip', async (req, res) => {
     archive.pipe(res)
 
     for (const row of f.rows) {
-      const url = await buildPublicUrl(row.key)
       const name = (row.filename || 'file').replace(/[\/\\]/g, '_')
-      const r = await fetch(url)
-      if (!r.ok || !r.body) { console.warn('[ZIP:skip]', url, r.status); continue }
-      archive.append(r.body, { name })
+      let bodyStream = null
+
+      // 1) Preferir leer directo del bucket (privado, sin URL pública)
+      if (s3) {
+        try {
+          const obj = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: row.key }))
+          bodyStream = obj.Body // Node stream
+        } catch (e) {
+          console.warn('[ZIP:getObject:fail]', row.key, e?.message || e)
+        }
+      }
+
+      // 2) Fallback: URL pública -> fetch() -> convertir a Node stream
+      if (!bodyStream) {
+        try {
+          const url = await buildPublicUrl(row.key)
+          const r = await fetch(url)
+          if (r.ok && r.body) bodyStream = asNodeStream(r.body)
+          else console.warn('[ZIP:fetch:fail]', url, r.status)
+        } catch (e) {
+          console.warn('[ZIP:fetch:error]', row.key, e?.message || e)
+        }
+      }
+
+      if (!bodyStream) { console.warn('[ZIP:skip]', row.key); continue }
+      archive.append(bodyStream, { name })
     }
 
     await archive.finalize()
