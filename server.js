@@ -1,4 +1,4 @@
-// Mixtli Transfer — Backend v2.14.5-lock
+// Mixtli Transfer — Backend v2.14.6-lock
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
 // S3/R2 presign + Packages + ZIP por streaming (SDK GetObject + fallback fetch->NodeStream)
 // /api/pack/create devuelve URL relativa: "/share/:id"
@@ -15,7 +15,7 @@ import crypto from 'crypto'
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import archiver from 'archiver'
-import { Readable } from 'stream'
+import { Readable } from 'node:stream'
 
 // --- Fallback fetch para Node <= 17 ---
 if (!globalThis.fetch) {
@@ -40,7 +40,7 @@ const EXPECTED = {
   TWILIO_ACCOUNT_SID: 'present',
   TWILIO_AUTH_TOKEN: 'present',
   TWILIO_FROM: 'present',
-  // Fix ZIP: origin público del backend (Render)
+  // Para bypassear Netlify en ZIP
   BACKEND_PUBLIC_ORIGIN: 'present'
 }
 function assertEnv () {
@@ -67,7 +67,6 @@ function assertEnv () {
   console.log('[CONFIG_GUARD] ✅ Config OK')
 }
 assertEnv()
-Object.freeze(process.env)
 
 /* -------------------- ENV -------------------- */
 const {
@@ -260,9 +259,7 @@ async function purgeOtps () {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') } catch {}
 }
 async function purgeExpiredPackages () {
-  try {
-    await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()')
-  } catch {}
+  try { await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()') } catch {}
 }
 setInterval(purgeOtps, 10 * 60 * 1000)
 setInterval(purgeExpiredPackages, 60 * 60 * 1000)
@@ -336,7 +333,7 @@ function absoluteZipUrl (id) {
 }
 
 // Convierte Web ReadableStream → Node stream (Node 18+)
-function asNodeStream(body) {
+function asNodeStream (body) {
   if (!body) return null
   if (typeof Readable.fromWeb === 'function' && body?.getReader) {
     try { return Readable.fromWeb(body) } catch { /* ignore */ }
@@ -381,7 +378,7 @@ const otpLimiter = rateLimit({
 /* -------------------- Rutas base -------------------- */
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.5-lock', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.6-lock', channel: 'sms-only' }))
 app.head('/api/health', (_req, res) => res.status(200).end())
 
 // Diag
@@ -391,7 +388,7 @@ app.get('/api/diag', (req, res) => {
   res.json({
     ok: true,
     node: process.version,
-    ver: '2.14.5-lock',
+    ver: '2.14.6-lock',
     cors_origins: ORIGINS,
     force_path: String(S3_FORCE_PATH_STYLE),
     public_base: !!PUBLIC_BASE_URL,
@@ -631,11 +628,11 @@ app.get('/api/pack/:id/zip', async (req, res) => {
       const name = (row.filename || 'file').replace(/[\/\\]/g, '_')
       let bodyStream = null
 
-      // 1) Preferir leer directo del bucket (privado, sin URL pública)
+      // 1) Preferir leer directo del bucket (privado)
       if (s3) {
         try {
           const obj = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: row.key }))
-          bodyStream = obj.Body // Node stream
+          bodyStream = obj.Body // Node Readable
         } catch (e) {
           console.warn('[ZIP:getObject:fail]', row.key, e?.message || e)
         }
