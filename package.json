@@ -1,24 +1,24 @@
 {
-  "name": "mixtli-transfer-backend",
+  "name": "mixtli-backend-wt",
   "version": "2.14.6",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "NODE_ENV=production node server.js",
+    "start": "node server.js",
     "dev": "NODE_ENV=production node server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.682.0",
-    "@aws-sdk/s3-request-presigner": "^3.682.0",
-    "archiver": "^6.0.2",
+    "@aws-sdk/client-s3": "^3.684.0",
+    "@aws-sdk/s3-request-presigner": "^3.684.0",
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.1.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
     "node-fetch": "^3.3.2",
-    "nodemailer": "^6.9.13",
-    "pg": "^8.12.0",
+    "nodemailer": "^6.9.14",
+    "pg": "^8.13.1",
     "twilio": "^5.3.6"
   }
 }
