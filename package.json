@@ -1,9 +1,9 @@
 {
   "name": "mixtli-backend",
-  "version": "2.15.0",
+  "version": "2.15.1",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   },
   "dependencies": {
     "archiver": "^7.0.1",
