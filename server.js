@@ -1,4 +1,4 @@
-// Mixtli Transfer — Backend v2.14.3-lock
+// Mixtli Transfer — Backend v2.14.4-lock
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
 // S3/R2 presign + Packages + ZIP por streaming
 // /api/pack/create devuelve URL relativa: "/share/:id"
@@ -24,7 +24,7 @@ if (!globalThis.fetch) {
 
 /* -------------------- CONFIG GUARD (candado) -------------------- */
 const EXPECTED = {
-  NODE_ENV: ['production'],            // en prod exige 'production'
+  NODE_ENV: ['production'],
   JWT_SECRET: 'present',
   DATABASE_URL: 'present',
 
@@ -33,7 +33,7 @@ const EXPECTED = {
   S3_BUCKET: 'present',
   S3_ACCESS_KEY_ID: 'present',
   S3_SECRET_ACCESS_KEY: 'present',
-  S3_FORCE_PATH_STYLE: ['true'],       // R2 => true
+  S3_FORCE_PATH_STYLE: ['true'],   // R2 => true
 
   // CORS como JSON array no vacío
   ALLOWED_ORIGINS: 'json-array-nonempty',
@@ -42,8 +42,11 @@ const EXPECTED = {
   TWILIO_ACCOUNT_SID: 'present',
   TWILIO_AUTH_TOKEN: 'present',
   TWILIO_FROM: 'present',
+
+  // Fix ZIP: origin público del backend
+  BACKEND_PUBLIC_ORIGIN: 'present'
 }
-function assertEnv() {
+function assertEnv () {
   const errs = []
   for (const [k, rule] of Object.entries(EXPECTED)) {
     const v = process.env[k]
@@ -67,7 +70,7 @@ function assertEnv() {
   console.log('[CONFIG_GUARD] ✅ Config OK')
 }
 assertEnv()
-Object.freeze(process.env) // evita mutaciones accidentales
+Object.freeze(process.env)
 
 /* -------------------- ENV -------------------- */
 const {
@@ -91,30 +94,33 @@ const {
   // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM, // +1xxxxxxxxxx
+  TWILIO_FROM,
 
   // S3/R2
-  S3_ENDPOINT,                 // https://<account>.r2.cloudflarestorage.com (sin bucket)
-  S3_BUCKET,                   // p. ej. mixtlitransfer3000
+  S3_ENDPOINT,
+  S3_BUCKET,
   S3_REGION = 'auto',
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
-  S3_FORCE_PATH_STYLE,         // 'true' para R2
-  PUBLIC_BASE_URL,             // opcional (links directos)
-  FORCE_RELATIVE_URLS = 'true',// default: siempre /share/:id
+  S3_FORCE_PATH_STYLE,
+  PUBLIC_BASE_URL,
+  FORCE_RELATIVE_URLS = 'true',
 
   // Descarga directa sugestionada
-  CONTENT_DISPOSITION = '',    // ej 'attachment'
+  CONTENT_DISPOSITION = '',
 
   // Token para /api/diag
-  CONFIG_DIAG_TOKEN = ''
+  CONFIG_DIAG_TOKEN = '',
+
+  // 👇 NUEVO: para bypassear Netlify en ZIP
+  BACKEND_PUBLIC_ORIGIN
 } = process.env
 
 /* -------------------- DB -------------------- */
 const pool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } })
-async function safeExec(sql) { try { await pool.query(sql) } catch {} }
+async function safeExec (sql) { try { await pool.query(sql) } catch {} }
 
-async function initDb() {
+async function initDb () {
   await safeExec('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
   await safeExec('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
 
@@ -173,8 +179,8 @@ async function initDb() {
     );
   `)
 
-  await safeExec(`CREATE INDEX IF NOT EXISTS package_files_pkg_idx ON package_files(package_id);`)
-  await safeExec(`CREATE INDEX IF NOT EXISTS packages_expires_idx ON packages(expires_at);`)
+  await safeExec('CREATE INDEX IF NOT EXISTS package_files_pkg_idx ON package_files(package_id);')
+  await safeExec('CREATE INDEX IF NOT EXISTS packages_expires_idx ON packages(expires_at);')
 
   console.log('[DB] ready')
 }
@@ -183,23 +189,22 @@ async function initDb() {
 const ttlMin = parseInt(OTP_TTL_MIN || '10', 10)
 const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
 
-function rand6() { return String(Math.floor(100000 + Math.random() * 900000)) }
+function rand6 () { return String(Math.floor(100000 + Math.random() * 900000)) }
 
-function normalizePhone(p) {
+function normalizePhone (p) {
   if (!p) return ''
   let s = String(p).trim().replace(/[\s\-()]/g, '')
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
   if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
 }
-function normalizeId(email, phone) {
+function normalizeId (email, phone) {
   const em = (email || '').trim().toLowerCase()
   const ph = normalizePhone(phone || '')
   return em || ph
 }
 
-// safeName robusto
-function safeName(name = '') {
+function safeName (name = '') {
   return String(name)
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -207,7 +212,7 @@ function safeName(name = '') {
     .slice(0, 180)
 }
 
-async function createOtp(key) {
+async function createOtp (key) {
   const code = rand6()
   await pool.query(
     `INSERT INTO otps (key, code, exp)
@@ -217,7 +222,7 @@ async function createOtp(key) {
   return code
 }
 
-async function verifyOtpDb(key, code) {
+async function verifyOtpDb (key, code) {
   const q = await pool.query(
     `SELECT id, code, exp FROM otps WHERE key=$1 ORDER BY id DESC LIMIT 1`,
     [key]
@@ -230,10 +235,10 @@ async function verifyOtpDb(key, code) {
   return true
 }
 
-function signToken(user) {
+function signToken (user) {
   return jwt.sign({ uid: user.id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' })
 }
-function authUid(req) {
+function authUid (req) {
   try {
     const h = req.headers.authorization || ''
     const tok = h.startsWith('Bearer ') ? h.slice(7) : ''
@@ -242,17 +247,17 @@ function authUid(req) {
     return dec?.uid || null
   } catch { return null }
 }
-function requireAuth(req, res, next) {
+function requireAuth (req, res, next) {
   const uid = authUid(req)
   if (!uid) return res.status(401).json({ error: 'no_token' })
   req.uid = uid
   next()
 }
 
-async function purgeOtps() {
+async function purgeOtps () {
   try { await pool.query('DELETE FROM otps WHERE exp < now()') } catch {}
 }
-async function purgeExpiredPackages() {
+async function purgeExpiredPackages () {
   try {
     await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()')
   } catch {}
@@ -268,7 +273,7 @@ if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
     host: SMTP_HOST, port: portN, secure: portN === 465, auth: { user: SMTP_USER, pass: SMTP_PASS }
   })
 }
-async function sendMail(to, subject, text) {
+async function sendMail (to, subject, text) {
   try {
     if (SENDGRID_API_KEY && SENDGRID_FROM) {
       const body = {
@@ -295,7 +300,7 @@ let twilioClient = null
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 }
-async function sendSmsOnly(rawTo, text) {
+async function sendSmsOnly (rawTo, text) {
   const to = normalizePhone(rawTo)
   if (!twilioClient) { console.log('[SMS:demo]', to, text); return }
   if (!TWILIO_FROM) { console.warn('[SMS] Falta TWILIO_FROM'); return }
@@ -315,8 +320,12 @@ if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
     forcePathStyle: FORCE_PATH
   })
 }
-function sanitizeEndpoint(ep) { return String(ep || '').replace(/\/+$/,'') }
-async function buildPublicUrl(key) {
+function sanitizeEndpoint (ep) { return String(ep || '').replace(/\/+$/,'') }
+function sanitizeOrigin (o) { return String(o || '').replace(/\/+$/,'') }
+
+const BACKEND_ORIGIN = sanitizeOrigin(BACKEND_PUBLIC_ORIGIN)
+
+async function buildPublicUrl (key) {
   if (PUBLIC_BASE_URL) return `${sanitizeEndpoint(PUBLIC_BASE_URL)}/${key}`
   const endpoint = sanitizeEndpoint(S3_ENDPOINT)
   const host = endpoint.replace(/^https?:\/\//, '')
@@ -325,11 +334,16 @@ async function buildPublicUrl(key) {
     : `https://${S3_BUCKET}.${host}/${key}`
 }
 
+// URL absoluta al ZIP en backend (evita proxy Netlify)
+function absoluteZipUrl (id) {
+  return `${BACKEND_ORIGIN}/api/pack/${id}/zip`
+}
+
 /* -------------------- App / CORS -------------------- */
 const app = express()
 let ORIGINS = []
 try { ORIGINS = JSON.parse(ALLOWED_ORIGINS || '[]') } catch {}
-function isNetlifyPreview(origin) {
+function isNetlifyPreview (origin) {
   try { return /\.netlify\.app$/i.test(new URL(origin).hostname) } catch { return false }
 }
 const corsMw = cors({
@@ -362,20 +376,21 @@ const otpLimiter = rateLimit({
 /* -------------------- Rutas base -------------------- */
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.3-lock', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.4-lock', channel: 'sms-only' }))
 app.head('/api/health', (_req, res) => res.status(200).end())
 
-// Diag con token (candado de lectura)
+// Diag
 app.get('/api/diag', (req, res) => {
   const tok = req.headers['x-config-token'] || ''
   if (!CONFIG_DIAG_TOKEN || tok !== CONFIG_DIAG_TOKEN) return res.status(401).json({ ok:false })
   res.json({
     ok: true,
     node: process.version,
-    ver: '2.14.3-lock',
+    ver: '2.14.4-lock',
     cors_origins: ORIGINS,
     force_path: String(S3_FORCE_PATH_STYLE),
     public_base: !!PUBLIC_BASE_URL,
+    backend_origin: BACKEND_ORIGIN,
     sms: !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM),
     mail: !!(SENDGRID_API_KEY || (SMTP_HOST && SMTP_USER)),
   })
@@ -544,7 +559,7 @@ app.get('/api/pack/:id', async (req, res) => {
       total_size: Number(p.rows[0].total_size) || 0,
       expires_at: p.rows[0].expires_at,
       files,
-      zip_url: `/api/pack/${id}/zip`
+      zip_url: absoluteZipUrl(id)
     })
   } catch (e) {
     console.error('[pack_fetch_failed]', e)
@@ -569,13 +584,15 @@ app.get('/share/:id', async (req, res) => {
       return `<li><a href="${url}" target="_blank" rel="noopener">${name}</a> — ${mb} MB</li>`
     }))
 
+    const zipAbs = absoluteZipUrl(id)
+
     res.type('html').send(`<!doctype html><meta charset="utf-8">
       <title>${(p.rows[0].title || 'Descargas').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</title>
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <div style="font-family:system-ui;padding:24px;max-width:820px;margin:auto;color:#e5e7eb;background:#0b0f17">
         <h1 style="margin:0 0 8px;font-size:28px;color:#fff">${(p.rows[0].title || 'Descargas').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</h1>
         <p style="margin:0 0 16px;color:#9ca3af">Expira: ${p.rows[0].expires_at}</p>
-        <p><a href="/api/pack/${id}/zip" style="display:inline-block;padding:8px 12px;background:#34d399;color:#001;border-radius:8px;text-decoration:none">Descargar todo (ZIP)</a></p>
+        <p><a href="${zipAbs}" style="display:inline-block;padding:8px 12px;background:#34d399;color:#001;border-radius:8px;text-decoration:none">Descargar todo (ZIP)</a></p>
         <ul style="line-height:1.9">${items.join('')}</ul>
       </div>`)
   } catch (e) {
