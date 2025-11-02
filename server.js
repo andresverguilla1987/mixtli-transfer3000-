@@ -1,4 +1,4 @@
-// Mixtli Transfer — Backend v2.15.0-MAX
+// Mixtli Transfer — Backend v2.15.1-MAX
 // Features: SMS-only (Twilio) OTP, CORS, RateLimit, purge, S3/R2 presign, Packages,
 // ZIP by streaming (AWS SDK GetObject + fetch->Node stream fallback),
 // Optional password, TTL, max downloads, counters, IP rate-limit per package,
@@ -19,7 +19,7 @@ import archiver from 'archiver'
 import { Readable } from 'node:stream'
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
 
-// Fallback fetch for Node <= 17
+// Fallback fetch for Node <= 17 (top-level await OK in ESM)
 if (!globalThis.fetch) {
   const { default: nodeFetch } = await import('node-fetch')
   globalThis.fetch = nodeFetch
@@ -143,7 +143,6 @@ async function initDb () {
     );
   `)
 
-  // Add unique indexes if missing
   await safeExec(`
   DO $$
   BEGIN
@@ -177,7 +176,6 @@ async function initDb () {
     );
   `)
 
-  // 🔧 Migrations for WeTransfer features (idempotent)
   await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS password_hash TEXT;`)
   await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS password_salt TEXT;`)
   await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS download_count BIGINT NOT NULL DEFAULT 0;`)
@@ -201,10 +199,10 @@ function rand6 () { return String(Math.floor(100000 + Math.random() * 900000)) }
 
 function normalizePhone (p) {
   if (!p) return ''
-  // FIX: put hyphen at the end of the class to avoid range issues
+  // FIX: clase sin backslash problemático y guion seguro
   let s = String(p).trim().replace(/[()\s-]/g, '')
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
-  if (!s.startsWith('+') && /^\\d{10,15}$/.test(s)) s = '+' + s
+  if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
 }
 function normalizeId (email, phone) {
@@ -216,13 +214,13 @@ function normalizeId (email, phone) {
 function safeName (name = '') {
   return String(name)
     .normalize('NFKD')
-    .replace(/[\\u0300-\\u036f]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')      // FIX: rango unicode correcto
     .replace(/[^A-Za-z0-9._-]+/g, '_')
     .slice(0, 180)
 }
 
-function sanitizeEndpoint (ep) { return String(ep || '').replace(/\\/+$/,'') }
-function sanitizeOrigin (o) { return String(o || '').replace(/\\/+$/,'') }
+function sanitizeEndpoint (ep) { return String(ep || '').replace(/\/+$/,'') } // FIX
+function sanitizeOrigin (o)    { return String(o  || '').replace(/\/+$/,'') } // FIX
 
 const BACKEND_ORIGIN = sanitizeOrigin(BACKEND_PUBLIC_ORIGIN)
 
@@ -286,10 +284,10 @@ setInterval(purgeExpiredPackages, 60 * 60 * 1000)
 
 // Mail
 let smtpTransport = null
+const smtpPortN = parseInt(SMTP_PORT || '587', 10)
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
-  const portN = parseInt(SMTP_PORT || '587', 10)
   smtpTransport = nodemailer.createTransport({
-    host: SMTP_HOST, port: portN, secure: portN === 465, auth: { user: SMTP_USER, pass: SMTP_PASS }
+    host: SMTP_HOST, port: smtpPortN, secure: smtpPortN === 465, auth: { user: SMTP_USER, pass: SMTP_PASS }
   })
 }
 async function sendMail (to, subject, text) {
@@ -342,7 +340,7 @@ if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
 async function buildPublicUrl (key) {
   if (PUBLIC_BASE_URL) return `${sanitizeEndpoint(PUBLIC_BASE_URL)}/${key}`
   const endpoint = sanitizeEndpoint(S3_ENDPOINT)
-  const host = endpoint.replace(/^https?:\\/\\//, '')
+  const host = endpoint.replace(/^https?:\/\//, '')
   return FORCE_PATH
     ? `${endpoint}/${S3_BUCKET}/${key}`
     : `https://${S3_BUCKET}.${host}/${key}`
@@ -367,7 +365,7 @@ const app = express()
 let ORIGINS = []
 try { ORIGINS = JSON.parse(ALLOWED_ORIGINS || '[]') } catch {}
 function isNetlifyPreview (origin) {
-  try { return /\\.netlify\\.app$/i.test(new URL(origin).hostname) } catch { return false }
+  try { return /\.netlify\.app$/i.test(new URL(origin).hostname) } catch { return false }
 }
 const corsMw = cors({
   origin: (o, cb) => {
@@ -398,7 +396,7 @@ const otpLimiter = rateLimit({
 
 /* -------------------- Base routes -------------------- */
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.15.0-MAX', channel: 'sms-only' }))
+app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.15.1-MAX', channel: 'sms-only' }))
 app.head('/api/health', (_req, res) => res.status(200).end())
 
 app.get('/api/diag', (req, res) => {
@@ -407,7 +405,7 @@ app.get('/api/diag', (req, res) => {
   res.json({
     ok: true,
     node: process.version,
-    ver: '2.15.0-MAX',
+    ver: '2.15.1-MAX',
     cors_origins: ORIGINS,
     force_path: String(S3_FORCE_PATH_STYLE),
     public_base: !!PUBLIC_BASE_URL,
