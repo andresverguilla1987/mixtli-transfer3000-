@@ -1,26 +1,25 @@
 {
-  "name": "mixtli-backend",
+  "name": "mixtli-transfer-backend",
   "version": "2.15.2",
   "type": "module",
   "engines": {
-    "node": "22.x"
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node --enable-source-maps server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
     "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "express-rate-limit": "^7.3.1",
+    "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
-    "nodemailer": "^6.9.14",
-    "pg": "^8.11.5",
-    "twilio": "^5.2.3",
-    "@aws-sdk/client-s3": "^3.645.0",
-    "@aws-sdk/s3-request-presigner": "^3.645.0",
-    "node-fetch": "^3.3.2"
-  },
-  "scripts": {
-    "start": "node --enable-source-maps server.js",
-    "dev": "NODE_ENV=production node --enable-source-maps server.js"
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.13",
+    "pg": "^8.11.3",
+    "twilio": "^4.21.0"
   }
 }
