@@ -1,11 +1,15 @@
-# Mixtli Transfer — Backend v2.14.7-lock+wt
-Parche listo para Render.
+# Mixtli Transfer MAX — Backend
 
-```bash
-npm install --no-audit --no-fund
-npm start
-```
+**Node/Express + Postgres + Cloudflare R2**.
 
-Fixes:
-- Regex de `normalizePhone` corregido (`[()\s-]`).
-- Migración en caliente: añade `password_hash`, `password_salt`, `download_count`, `max_downloads`, `max_total_mb` si faltan.
+## Deploy (Render)
+1. New Web Service → Node 18+.
+2. Build command: `npm install --no-audit --no-fund`
+3. Start command: `node --enable-source-maps server.js`
+4. Add **Environment variables** using `.env.example` as template.
+5. Make sure `ALLOWED_ORIGINS` includes your Netlify domain.
+6. Open `/api/health` to verify.
+
+## Important
+- If you previously deployed an older schema, this version **auto-migrates** missing columns with `ALTER TABLE IF NOT EXISTS`.
+- Regex crash fixed: phone sanitizer now uses `/[()\s-]/g` (hyphen at end).
