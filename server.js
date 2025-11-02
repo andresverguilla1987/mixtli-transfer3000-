@@ -1,7 +1,7 @@
-// Mixtli Transfer — Backend v2.14.2
+// Mixtli Transfer — Backend v2.14.3-lock
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
 // S3/R2 presign + Packages + ZIP por streaming
-// /api/pack/create devuelve URL **relativa**: "/share/:id"
+// /api/pack/create devuelve URL relativa: "/share/:id"
 
 import 'dotenv/config'
 import express from 'express'
@@ -22,7 +22,54 @@ if (!globalThis.fetch) {
   globalThis.fetch = nodeFetch
 }
 
-// -------------------- ENV --------------------
+/* -------------------- CONFIG GUARD (candado) -------------------- */
+const EXPECTED = {
+  NODE_ENV: ['production'],            // en prod exige 'production'
+  JWT_SECRET: 'present',
+  DATABASE_URL: 'present',
+
+  // S3/R2 obligatorias
+  S3_ENDPOINT: 'present',
+  S3_BUCKET: 'present',
+  S3_ACCESS_KEY_ID: 'present',
+  S3_SECRET_ACCESS_KEY: 'present',
+  S3_FORCE_PATH_STYLE: ['true'],       // R2 => true
+
+  // CORS como JSON array no vacío
+  ALLOWED_ORIGINS: 'json-array-nonempty',
+
+  // Twilio (solo SMS)
+  TWILIO_ACCOUNT_SID: 'present',
+  TWILIO_AUTH_TOKEN: 'present',
+  TWILIO_FROM: 'present',
+}
+function assertEnv() {
+  const errs = []
+  for (const [k, rule] of Object.entries(EXPECTED)) {
+    const v = process.env[k]
+    if (rule === 'present') { if (!v) errs.push(`${k} vacío`); continue }
+    if (rule === 'json-array-nonempty') {
+      try {
+        const arr = JSON.parse(v || '[]')
+        if (!Array.isArray(arr) || arr.length === 0) errs.push(`${k} debe ser JSON array no vacío`)
+      } catch { errs.push(`${k} JSON inválido`) }
+      continue
+    }
+    if (Array.isArray(rule)) {
+      if (!rule.includes(String(v))) errs.push(`${k}=${v} no permitido (esperado: ${rule.join('|')})`)
+      continue
+    }
+  }
+  if (errs.length) {
+    console.error('[CONFIG_GUARD] ❌', errs)
+    process.exit(1)
+  }
+  console.log('[CONFIG_GUARD] ✅ Config OK')
+}
+assertEnv()
+Object.freeze(process.env) // evita mutaciones accidentales
+
+/* -------------------- ENV -------------------- */
 const {
   PORT = 10000,
   DATABASE_URL,
@@ -39,7 +86,7 @@ const {
   SMTP_FROM,
 
   // CORS
-  ALLOWED_ORIGINS = '["http://localhost:8888","http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","https://lighthearted-froyo-9dd448.netlify.app"]',
+  ALLOWED_ORIGINS,
 
   // Twilio (solo SMS)
   TWILIO_ACCOUNT_SID,
@@ -52,23 +99,20 @@ const {
   S3_REGION = 'auto',
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
-  S3_FORCE_PATH_STYLE = 'true', // en R2 => true
-  PUBLIC_BASE_URL,              // opcional (sólo para links directos de archivos)
-  FORCE_RELATIVE_URLS = 'true', // default: siempre /share/:id
+  S3_FORCE_PATH_STYLE,         // 'true' para R2
+  PUBLIC_BASE_URL,             // opcional (links directos)
+  FORCE_RELATIVE_URLS = 'true',// default: siempre /share/:id
 
-  // Sugerir descarga directa
-  CONTENT_DISPOSITION = ''      // ej: 'attachment'
+  // Descarga directa sugestionada
+  CONTENT_DISPOSITION = '',    // ej 'attachment'
+
+  // Token para /api/diag
+  CONFIG_DIAG_TOKEN = ''
 } = process.env
 
-if (!DATABASE_URL) {
-  console.error('[FATAL] Missing DATABASE_URL')
-  process.exit(1)
-}
-
-// -------------------- DB --------------------
+/* -------------------- DB -------------------- */
 const pool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } })
-
-async function safeExec(sql) { try { await pool.query(sql) } catch { /* noop */ } }
+async function safeExec(sql) { try { await pool.query(sql) } catch {} }
 
 async function initDb() {
   await safeExec('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
@@ -96,7 +140,6 @@ async function initDb() {
     );
   `)
 
-  // índices únicos condicionales para users
   await pool.query(`
   DO $$
   BEGIN
@@ -108,7 +151,6 @@ async function initDb() {
     END IF;
   END $$;`)
 
-  // paquetes
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -137,7 +179,7 @@ async function initDb() {
   console.log('[DB] ready')
 }
 
-// -------------------- Helpers --------------------
+/* -------------------- Helpers -------------------- */
 const ttlMin = parseInt(OTP_TTL_MIN || '10', 10)
 const FORCE_PATH = String(S3_FORCE_PATH_STYLE).toLowerCase() === 'true'
 
@@ -156,7 +198,7 @@ function normalizeId(email, phone) {
   return em || ph
 }
 
-// safeName robusto: normaliza, remueve diacríticos, permite [A-Za-z0-9._-]
+// safeName robusto
 function safeName(name = '') {
   return String(name)
     .normalize('NFKD')
@@ -215,8 +257,8 @@ async function purgeExpiredPackages() {
     await pool.query('DELETE FROM packages WHERE expires_at IS NOT NULL AND expires_at < now()')
   } catch {}
 }
-setInterval(purgeOtps, 10 * 60 * 1000)            // cada 10 min
-setInterval(purgeExpiredPackages, 60 * 60 * 1000) // cada hora
+setInterval(purgeOtps, 10 * 60 * 1000)
+setInterval(purgeExpiredPackages, 60 * 60 * 1000)
 
 // Mail
 let smtpTransport = null
@@ -268,14 +310,12 @@ let s3 = null
 if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
   s3 = new S3Client({
     region: S3_REGION,
-    endpoint: S3_ENDPOINT, // sin /<bucket>
+    endpoint: S3_ENDPOINT,
     credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
     forcePathStyle: FORCE_PATH
   })
 }
-function sanitizeEndpoint(ep) {
-  return String(ep || '').replace(/\/+$/,'')
-}
+function sanitizeEndpoint(ep) { return String(ep || '').replace(/\/+$/,'') }
 async function buildPublicUrl(key) {
   if (PUBLIC_BASE_URL) return `${sanitizeEndpoint(PUBLIC_BASE_URL)}/${key}`
   const endpoint = sanitizeEndpoint(S3_ENDPOINT)
@@ -285,16 +325,16 @@ async function buildPublicUrl(key) {
     : `https://${S3_BUCKET}.${host}/${key}`
 }
 
-// -------------------- App / CORS --------------------
+/* -------------------- App / CORS -------------------- */
 const app = express()
 let ORIGINS = []
-try { ORIGINS = JSON.parse(ALLOWED_ORIGINS) } catch {}
+try { ORIGINS = JSON.parse(ALLOWED_ORIGINS || '[]') } catch {}
 function isNetlifyPreview(origin) {
   try { return /\.netlify\.app$/i.test(new URL(origin).hostname) } catch { return false }
 }
 const corsMw = cors({
   origin: (o, cb) => {
-    if (!o) return cb(null, true) // curl/Postman/SSR
+    if (!o) return cb(null, true)
     if (ORIGINS.includes(o) || isNetlifyPreview(o)) return cb(null, true)
     return cb(new Error('origin_not_allowed'))
   },
@@ -312,18 +352,34 @@ app.options('*', corsMw)
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '4mb' }))
 
-// -------------------- Rate-limit OTP --------------------
+/* -------------------- Rate-limit OTP -------------------- */
 const otpLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, max: 8,
   standardHeaders: true, legacyHeaders: false,
   skip: (req) => req.method === 'OPTIONS'
 })
 
-// -------------------- Rutas base --------------------
+/* -------------------- Rutas base -------------------- */
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.2', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.3-lock', channel: 'sms-only' }))
 app.head('/api/health', (_req, res) => res.status(200).end())
+
+// Diag con token (candado de lectura)
+app.get('/api/diag', (req, res) => {
+  const tok = req.headers['x-config-token'] || ''
+  if (!CONFIG_DIAG_TOKEN || tok !== CONFIG_DIAG_TOKEN) return res.status(401).json({ ok:false })
+  res.json({
+    ok: true,
+    node: process.version,
+    ver: '2.14.3-lock',
+    cors_origins: ORIGINS,
+    force_path: String(S3_FORCE_PATH_STYLE),
+    public_base: !!PUBLIC_BASE_URL,
+    sms: !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM),
+    mail: !!(SENDGRID_API_KEY || (SMTP_HOST && SMTP_USER)),
+  })
+})
 
 app.get('/api/auth/whoami', (req, res) => {
   const uid = authUid(req)
@@ -388,7 +444,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 })
 
-// -------------------- Presign S3/R2 --------------------
+/* -------------------- Presign S3/R2 -------------------- */
 app.post('/api/presign', requireAuth, async (req, res) => {
   try {
     if (!s3) return res.status(500).json({ error: 's3_not_configured' })
@@ -399,8 +455,8 @@ app.post('/api/presign', requireAuth, async (req, res) => {
     const params = { Bucket: S3_BUCKET, Key: key, ContentType: type }
     if (CONTENT_DISPOSITION) params.ContentDisposition = CONTENT_DISPOSITION
 
-    const cmd = new PutObjectCommand(params) // R2: no usar ACL
-    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }) // 5 min
+    const cmd = new PutObjectCommand(params)
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 300 })
     res.json({ method: 'PUT', url, key, publicUrl: await buildPublicUrl(key) })
   } catch (e) {
     console.error('[presign_failed]', e)
@@ -419,7 +475,7 @@ app.post('/api/complete', requireAuth, async (req, res) => {
   }
 })
 
-// -------------------- PACKAGES --------------------
+/* -------------------- PACKAGES -------------------- */
 app.post('/api/pack/create', requireAuth, async (req, res) => {
   try {
     const { title = 'Mis archivos', ttlDays = 30, files = [] } = req.body || {}
@@ -437,7 +493,6 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     )
     const pid = r.rows[0].id
 
-    // bulk insert files
     const values = []
     const params = []
     files.forEach(f => {
@@ -529,7 +584,7 @@ app.get('/share/:id', async (req, res) => {
   }
 })
 
-// -------------------- ZIP del paquete (streaming) --------------------
+// ZIP del paquete (streaming)
 app.get('/api/pack/:id/zip', async (req, res) => {
   try {
     const id = req.params.id
@@ -554,10 +609,7 @@ app.get('/api/pack/:id/zip', async (req, res) => {
       const url = await buildPublicUrl(row.key)
       const name = (row.filename || 'file').replace(/[\/\\]/g, '_')
       const r = await fetch(url)
-      if (!r.ok || !r.body) {
-        console.warn('[ZIP:skip]', url, r.status)
-        continue
-      }
+      if (!r.ok || !r.body) { console.warn('[ZIP:skip]', url, r.status); continue }
       archive.append(r.body, { name })
     }
 
@@ -568,7 +620,7 @@ app.get('/api/pack/:id/zip', async (req, res) => {
   }
 })
 
-// -------------------- Debug --------------------
+/* -------------------- Debug -------------------- */
 app.get('/api/debug/twilio/:sid', async (req, res) => {
   try {
     if (!twilioClient) return res.status(500).json({ error: 'no_twilio_client' })
