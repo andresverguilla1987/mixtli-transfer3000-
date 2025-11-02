@@ -1,9 +1,5 @@
-// Mixtli Transfer — Backend v2.15.1-MAX
-// Features: SMS-only (Twilio) OTP, CORS, RateLimit, purge, S3/R2 presign, Packages,
-// ZIP by streaming (AWS SDK GetObject + fetch->Node stream fallback),
-// Optional password, TTL, max downloads, counters, IP rate-limit per package,
-// Absolute ZIP URL via BACKEND_PUBLIC_ORIGIN to bypass Netlify proxy issues.
 
+/* Mixtli Transfer — Backend v2.15.2-MAX (FIX) */
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
@@ -19,7 +15,6 @@ import archiver from 'archiver'
 import { Readable } from 'node:stream'
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
 
-// Fallback fetch for Node <= 17 (top-level await OK in ESM)
 if (!globalThis.fetch) {
   const { default: nodeFetch } = await import('node-fetch')
   globalThis.fetch = nodeFetch
@@ -36,9 +31,6 @@ const EXPECTED = {
   S3_SECRET_ACCESS_KEY: 'present',
   S3_FORCE_PATH_STYLE: ['true'],
   ALLOWED_ORIGINS: 'json-array-nonempty',
-  TWILIO_ACCOUNT_SID: 'present',
-  TWILIO_AUTH_TOKEN: 'present',
-  TWILIO_FROM: 'present',
   BACKEND_PUBLIC_ORIGIN: 'present'
 }
 function assertEnv () {
@@ -58,10 +50,7 @@ function assertEnv () {
       continue
     }
   }
-  if (errs.length) {
-    console.error('[CONFIG_GUARD] ❌', errs)
-    process.exit(1)
-  }
+  if (errs.length) { console.error('[CONFIG_GUARD] ❌', errs); process.exit(1) }
   console.log('[CONFIG_GUARD] ✅ Config OK')
 }
 assertEnv()
@@ -97,9 +86,7 @@ const {
   FORCE_RELATIVE_URLS = 'true',
 
   CONTENT_DISPOSITION = '',
-
   CONFIG_DIAG_TOKEN = '',
-
   BACKEND_PUBLIC_ORIGIN,
 
   FREE_MAX_TOTAL_MB = '200',
@@ -108,41 +95,31 @@ const {
   PRO_MAX_DOWNLOADS = '1000',
 
   PACKAGE_PASSWORD_MINLEN = '4',
-
   DL_RATE_WINDOW_S = '60',
-  DL_RATE_MAX = '60'
+  DL_RATE_MAX = '60',
+  ALLOW_DEMO_OTP = 'false'
 } = process.env
 
 /* -------------------- DB -------------------- */
 const pool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } })
 async function safeExec (sql) { try { await pool.query(sql) } catch (e) { console.warn('[safeExec]', e.message) } }
-
 async function initDb () {
   await safeExec('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
   await safeExec('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
-
   await safeExec(`
     CREATE TABLE IF NOT EXISTS users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      email TEXT,
-      phone TEXT,
-      plan  TEXT NOT NULL DEFAULT 'FREE',
+      email TEXT, phone TEXT, plan TEXT NOT NULL DEFAULT 'FREE',
       plan_expires_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `)
-
+    );`)
   await safeExec(`
     CREATE TABLE IF NOT EXISTS otps (
       id BIGSERIAL PRIMARY KEY,
-      key TEXT NOT NULL,
-      code TEXT NOT NULL,
-      exp TIMESTAMPTZ NOT NULL,
+      key TEXT NOT NULL, code TEXT NOT NULL, exp TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `)
-
+    );`)
   await safeExec(`
   DO $$
   BEGIN
@@ -153,41 +130,28 @@ async function initDb () {
       EXECUTE 'CREATE UNIQUE INDEX users_phone_key ON users(phone) WHERE phone IS NOT NULL';
     END IF;
   END $$;`)
-
   await safeExec(`
     CREATE TABLE IF NOT EXISTS packages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      owner_uid UUID,
-      title TEXT,
-      total_size BIGINT DEFAULT 0,
+      owner_uid UUID, title TEXT, total_size BIGINT DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       expires_at TIMESTAMPTZ
-    );
-  `)
-
+    );`)
   await safeExec(`
     CREATE TABLE IF NOT EXISTS package_files (
       id BIGSERIAL PRIMARY KEY,
       package_id UUID REFERENCES packages(id) ON DELETE CASCADE,
-      key TEXT NOT NULL,
-      filename TEXT,
-      size BIGINT,
-      content_type TEXT
-    );
-  `)
-
-  await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS password_hash TEXT;`)
-  await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS password_salt TEXT;`)
-  await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS download_count BIGINT NOT NULL DEFAULT 0;`)
-  await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_downloads BIGINT;`)
-  await safeExec(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_total_mb BIGINT;`)
-
+      key TEXT NOT NULL, filename TEXT, size BIGINT, content_type TEXT
+    );`)
+  await safeExec('ALTER TABLE packages ADD COLUMN IF NOT EXISTS password_hash TEXT;')
+  await safeExec('ALTER TABLE packages ADD COLUMN IF NOT EXISTS password_salt TEXT;')
+  await safeExec('ALTER TABLE packages ADD COLUMN IF NOT EXISTS download_count BIGINT NOT NULL DEFAULT 0;')
+  await safeExec('ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_downloads BIGINT;')
+  await safeExec('ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_total_mb BIGINT;')
   await safeExec('CREATE TABLE IF NOT EXISTS package_downloads (id BIGSERIAL PRIMARY KEY, package_id UUID REFERENCES packages(id) ON DELETE CASCADE, ip INET, user_agent TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());')
   await safeExec('CREATE INDEX IF NOT EXISTS pkg_dl_pkg_idx ON package_downloads(package_id);')
-
   await safeExec('CREATE INDEX IF NOT EXISTS package_files_pkg_idx ON package_files(package_id);')
   await safeExec('CREATE INDEX IF NOT EXISTS packages_expires_idx ON packages(expires_at);')
-
   console.log('[DB] ready')
 }
 
@@ -199,7 +163,6 @@ function rand6 () { return String(Math.floor(100000 + Math.random() * 900000)) }
 
 function normalizePhone (p) {
   if (!p) return ''
-  // FIX: clase sin backslash problemático y guion seguro
   let s = String(p).trim().replace(/[()\s-]/g, '')
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
   if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
@@ -212,16 +175,14 @@ function normalizeId (email, phone) {
 }
 
 function safeName (name = '') {
-  return String(name)
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')      // FIX: rango unicode correcto
+  return String(name).normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^A-Za-z0-9._-]+/g, '_')
     .slice(0, 180)
 }
 
-function sanitizeEndpoint (ep) { return String(ep || '').replace(/\/+$/,'') } // FIX
-function sanitizeOrigin (o)    { return String(o  || '').replace(/\/+$/,'') } // FIX
-
+function sanitizeEndpoint (ep) { return String(ep || '').replace(/\/+$/,'') }
+function sanitizeOrigin  (o)  { return String(o  || '').replace(/\/+$/,'') }
 const BACKEND_ORIGIN = sanitizeOrigin(BACKEND_PUBLIC_ORIGIN)
 
 function hashPassword(pwd) {
@@ -239,17 +200,12 @@ async function createOtp (key) {
   const code = rand6()
   await pool.query(
     `INSERT INTO otps (key, code, exp)
-     VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`,
-    [key, code, ttlMin]
-  )
+     VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`, [key, code, ttlMin])
   return code
 }
-
 async function verifyOtpDb (key, code) {
   const q = await pool.query(
-    `SELECT id, code, exp FROM otps WHERE key=$1 ORDER BY id DESC LIMIT 1`,
-    [key]
-  )
+    `SELECT id, code, exp FROM otps WHERE key=$1 ORDER BY id DESC LIMIT 1`, [key])
   if (!q.rows.length) return false
   const row = q.rows[0]
   if (row.code !== String(code)) return false
@@ -258,9 +214,7 @@ async function verifyOtpDb (key, code) {
   return true
 }
 
-function signToken (user) {
-  return jwt.sign({ uid: user.id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' })
-}
+function signToken (user) { return jwt.sign({ uid: user.id, plan: user.plan }, JWT_SECRET, { expiresIn: '30d' }) }
 function authUid (req) {
   try {
     const h = req.headers.authorization || ''
@@ -291,25 +245,24 @@ if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
   })
 }
 async function sendMail (to, subject, text) {
-  try {
-    if (SENDGRID_API_KEY && SENDGRID_FROM) {
-      const body = {
-        personalizations: [{ to: [{ email: to }] }],
-        from: { email: SENDGRID_FROM },
-        subject,
-        content: [{ type: 'text/plain', value: text }]
-      }
-      const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      })
-      if (!r.ok) console.warn('[MAIL] SendGrid error:', await r.text())
-      return
+  if (SENDGRID_API_KEY && SENDGRID_FROM) {
+    const body = {
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: SENDGRID_FROM },
+      subject,
+      content: [{ type: 'text/plain', value: text }]
     }
-    if (smtpTransport) await smtpTransport.sendMail({ from: SMTP_FROM || SMTP_USER, to, subject, text })
-    else console.log('[MAIL:demo]', to, subject, text)
-  } catch (e) { console.warn('[MAIL] failed', e?.message || e) }
+    const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    if (!r.ok) throw new Error('sendgrid_failed')
+    return
+  }
+  if (smtpTransport) { await smtpTransport.sendMail({ from: SMTP_FROM || SMTP_USER, to, subject, text }); return }
+  // demo: no channel configured
+  console.log('[MAIL:demo]', to, subject, text)
 }
 
 // Twilio
@@ -320,11 +273,9 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 async function sendSmsOnly (rawTo, text) {
   const to = normalizePhone(rawTo)
   if (!twilioClient) { console.log('[SMS:demo]', to, text); return }
-  if (!TWILIO_FROM) { console.warn('[SMS] Falta TWILIO_FROM'); return }
-  try {
-    const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body: text })
-    console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
-  } catch (e) { console.warn('[SMS ERROR]', e?.code || e?.status || '', e?.message || String(e)) }
+  if (!TWILIO_FROM) throw new Error('twilio_from_missing')
+  const msg = await twilioClient.messages.create({ to, from: TWILIO_FROM, body: text })
+  console.log('[Twilio SID]', msg.sid, 'status=', msg.status)
 }
 
 // S3/R2
@@ -374,13 +325,11 @@ const corsMw = cors({
     return cb(new Error('origin_not_allowed'))
   },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization','x-admin-token','x-cron-token','x-mixtli-token','x-package-password'],
+  allowedHeaders: ['Content-Type','Authorization','x-admin-token','x-cron-token','x-mixtli-token','x-package-password','x-config-token'],
   optionsSuccessStatus: 204
 })
 app.use((req,res,next)=>corsMw(req,res,(err)=>{
-  if (err?.message === 'origin_not_allowed') {
-    return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
-  }
+  if (err?.message === 'origin_not_allowed') return res.status(403).json({ error: 'origin_not_allowed', origin: req.headers.origin || null })
   next()
 }))
 app.options('*', corsMw)
@@ -396,21 +345,13 @@ const otpLimiter = rateLimit({
 
 /* -------------------- Base routes -------------------- */
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.15.1-MAX', channel: 'sms-only' }))
+app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString(), ver: '2.15.2-MAX', channel: 'otp' }))
 app.head('/api/health', (_req, res) => res.status(200).end())
 
 app.get('/api/diag', (req, res) => {
   const tok = req.headers['x-config-token'] || ''
   if (!CONFIG_DIAG_TOKEN || tok !== CONFIG_DIAG_TOKEN) return res.status(401).json({ ok:false })
-  res.json({
-    ok: true,
-    node: process.version,
-    ver: '2.15.1-MAX',
-    cors_origins: ORIGINS,
-    force_path: String(S3_FORCE_PATH_STYLE),
-    public_base: !!PUBLIC_BASE_URL,
-    backend_origin: BACKEND_ORIGIN
-  })
+  res.json({ ok:true, node: process.version, ver: '2.15.2-MAX', cors_origins: ORIGINS, force_path: String(S3_FORCE_PATH_STYLE), public_base: !!PUBLIC_BASE_URL, backend_origin: BACKEND_ORIGIN })
 })
 
 app.get('/api/auth/whoami', (req, res) => {
@@ -430,10 +371,30 @@ app.post('/api/auth/register', otpLimiter, async (req, res) => {
     const { email='', phone='' } = req.body || {}
     const id = normalizeId(email, phone)
     if (!id) return res.status(400).json({ error: 'email_or_phone_required' })
-    const code = await createOtp(id)
-    if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
-    else        await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
-    res.json({ ok: true, msg: 'otp_sent' })
+
+    let code
+    try {
+      code = await createOtp(id)
+    } catch (e) {
+      console.error('[otp_db_error]', e?.message || e)
+      return res.status(500).json({ error: 'otp_db_error' })
+    }
+
+    try {
+      if (email) {
+        await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
+      } else {
+        await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
+      }
+      return res.json({ ok: true, msg: 'otp_sent' })
+    } catch (e) {
+      console.error('[otp_channel_failed]', e?.message || e)
+      if (String(ALLOW_DEMO_OTP).toLowerCase() === 'true') {
+        console.log('[DEMO_OTP]', id, code)
+        return res.json({ ok:true, msg:'otp_sent_demo', demo:true })
+      }
+      return res.status(500).json({ error: 'otp_channel_failed' })
+    }
   } catch (e) {
     console.error('[register_failed]', e)
     res.status(500).json({ error: 'otp_send_failed' })
@@ -511,9 +472,7 @@ app.post('/api/complete', requireAuth, async (req, res) => {
 app.post('/api/pack/create', requireAuth, async (req, res) => {
   try {
     const { title = 'Mis archivos', ttlDays = 30, files = [], password = '', maxDownloads, maxTotalMB } = req.body || {}
-    if (!Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ error: 'no_files' })
-    }
+    if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: 'no_files' })
 
     const userRow = (await pool.query('SELECT id, plan FROM users WHERE id=$1', [req.uid])).rows[0]
     const lim = planLimits(userRow?.plan || 'FREE')
@@ -521,9 +480,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     const totalSize = files.reduce((a, f) => a + (Number(f.size) || 0), 0)
     const totalMB = Math.ceil(totalSize / (1024*1024))
     const effectiveMaxMB = Math.min(Number(maxTotalMB || lim.maxTotalMB), lim.maxTotalMB)
-    if (totalMB > effectiveMaxMB) {
-      return res.status(400).json({ error: 'package_too_big', max_mb: effectiveMaxMB, got_mb: totalMB })
-    }
+    if (totalMB > effectiveMaxMB) return res.status(400).json({ error: 'package_too_big', max_mb: effectiveMaxMB, got_mb: totalMB })
 
     const ttl = Math.min(Math.max(parseInt(ttlDays || 30, 10), 1), 180)
 
@@ -564,9 +521,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
 
     const sharePath = `/share/${pid}`
     const relative = String(FORCE_RELATIVE_URLS).toLowerCase() === 'true'
-    const url = relative
-      ? sharePath
-      : ((PUBLIC_BASE_URL || '') ? (sanitizeEndpoint(PUBLIC_BASE_URL) + sharePath) : sharePath)
+    const url = relative ? sharePath : ((PUBLIC_BASE_URL || '') ? (sanitizeEndpoint(PUBLIC_BASE_URL) + sharePath) : sharePath)
 
     res.json({ ok: true, id: pid, url, expires_at: r.rows[0].expires_at, password: !!password })
   } catch (e) {
@@ -593,12 +548,8 @@ app.get('/api/pack/:id', async (req, res) => {
       }))
     )
     res.json({
-      id,
-      title: p.rows[0].title,
-      total_size: Number(p.rows[0].total_size) || 0,
-      expires_at: p.rows[0].expires_at,
-      files,
-      zip_url: absoluteZipUrl(id)
+      id, title: p.rows[0].title, total_size: Number(p.rows[0].total_size) || 0,
+      expires_at: p.rows[0].expires_at, files, zip_url: absoluteZipUrl(id)
     })
   } catch (e) {
     console.error('[pack_fetch_failed]', e)
@@ -647,10 +598,7 @@ app.get('/share/:id', async (req, res) => {
             if (!pwd) return;
             try {
               const r = await fetch(zipUrl, { headers: { 'x-package-password': pwd } });
-              if (!r.ok) {
-                alert('Contraseña incorrecta o límite alcanzado.');
-                return;
-              }
+              if (!r.ok) { alert('Contraseña incorrecta o límite alcanzado.'); return; }
               const blob = await r.blob();
               const a = document.createElement('a');
               a.href = URL.createObjectURL(blob);
@@ -659,9 +607,7 @@ app.get('/share/:id', async (req, res) => {
               a.click();
               a.remove();
               setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
-            } catch(e) {
-              alert('Error al descargar.');
-            }
+            } catch(e) { alert('Error al descargar.'); }
           });
         })();
       </script>`)
@@ -678,16 +624,11 @@ async function guardPackageAccess(req, res, next) {
     const p = (await pool.query('SELECT * FROM packages WHERE id=$1', [id])).rows[0]
     if (!p) return res.status(404).json({ error: 'not_found' })
     if (p.expires_at && new Date(p.expires_at) < new Date()) return res.status(410).json({ error: 'expired' })
-
-    if (p.max_downloads && Number(p.download_count || 0) >= Number(p.max_downloads)) {
-      return res.status(429).json({ error: 'download_limit_reached' })
-    }
+    if (p.max_downloads && Number(p.download_count || 0) >= Number(p.max_downloads)) return res.status(429).json({ error: 'download_limit_reached' })
 
     if (p.password_hash) {
       const pwd = (req.headers['x-package-password'] || req.query.p || '')
-      if (!pwd || !verifyPassword(pwd, p.password_salt, p.password_hash)) {
-        return res.status(401).json({ error: 'password_required_or_invalid' })
-      }
+      if (!pwd || !verifyPassword(pwd, p.password_salt, p.password_hash)) return res.status(401).json({ error: 'password_required_or_invalid' })
     }
 
     const win = parseInt(DL_RATE_WINDOW_S || '60', 10)
@@ -696,15 +637,10 @@ async function guardPackageAccess(req, res, next) {
     await pool.query(`INSERT INTO package_downloads (package_id, ip, user_agent) VALUES ($1,$2,$3)`, [id, ip, req.headers['user-agent'] || null])
     const c = await pool.query(`
       SELECT count(*)::int AS n
-      FROM package_downloads
-      WHERE package_id=$1 AND ip=$2 AND created_at > now() - make_interval(secs => $3)
-    `, [id, ip, win])
-    if ((c.rows[0]?.n || 0) > max) {
-      return res.status(429).json({ error: 'rate_limited' })
-    }
+      FROM package_downloads WHERE package_id=$1 AND ip=$2 AND created_at > now() - make_interval(secs => $3)`, [id, ip, win])
+    if ((c.rows[0]?.n || 0) > max) return res.status(429).json({ error: 'rate_limited' })
 
-    req._pkg = p
-    next()
+    req._pkg = p; next()
   } catch (e) {
     console.error('[guardPackageAccess]', e)
     res.status(500).json({ error: 'guard_failed' })
@@ -716,11 +652,7 @@ app.get('/api/pack/:id/zip', guardPackageAccess, async (req, res) => {
   try {
     const p = req._pkg
     const id = p.id
-
-    const f = await pool.query(
-      'SELECT key, filename, size FROM package_files WHERE package_id=$1 ORDER BY id',
-      [id]
-    )
+    const f = await pool.query('SELECT key, filename, size FROM package_files WHERE package_id=$1 ORDER BY id', [id])
     if (!f.rows.length) return res.status(400).json({ error: 'empty_package' })
 
     const zipName = `${(p.title || 'mixtli').replace(/[^\w-]+/g,'_') || 'mixtli'}.zip`
@@ -736,33 +668,22 @@ app.get('/api/pack/:id/zip', guardPackageAccess, async (req, res) => {
       let bodyStream = null
 
       if (s3) {
-        try {
-          const obj = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: row.key }))
-          bodyStream = obj.Body
-        } catch (e) {
-          console.warn('[ZIP:getObject:fail]', row.key, e?.message || e)
-        }
+        try { const obj = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: row.key })); bodyStream = obj.Body }
+        catch (e) { console.warn('[ZIP:getObject:fail]', row.key, e?.message || e) }
       }
-
       if (!bodyStream) {
         try {
           const url = await buildPublicUrl(row.key)
           const r = await fetch(url)
-          if (r.ok && r.body) bodyStream = asNodeStream(r.body)
-          else console.warn('[ZIP:fetch:fail]', url, r.status)
-        } catch (e) {
-          console.warn('[ZIP:fetch:error]', row.key, e?.message || e)
-        }
+          if (r.ok && r.body) bodyStream = asNodeStream(r.body); else console.warn('[ZIP:fetch:fail]', url, r.status)
+        } catch (e) { console.warn('[ZIP:fetch:error]', row.key, e?.message || e) }
       }
 
       if (!bodyStream) { console.warn('[ZIP:skip]', row.key); continue }
       archive.append(bodyStream, { name })
     }
 
-    archive.on('end', async () => {
-      try { await pool.query('UPDATE packages SET download_count = download_count + 1 WHERE id=$1', [id]) } catch {}
-    })
-
+    archive.on('end', async () => { try { await pool.query('UPDATE packages SET download_count = download_count + 1 WHERE id=$1', [id]) } catch {} })
     await archive.finalize()
   } catch (e) {
     console.error('[pack_zip_failed]', e)
@@ -775,30 +696,20 @@ app.get('/api/debug/twilio/:sid', async (req, res) => {
   try {
     if (!twilioClient) return res.status(500).json({ error: 'no_twilio_client' })
     const msg = await twilioClient.messages(req.params.sid).fetch()
-    res.json({
-      sid: msg.sid, status: msg.status, to: msg.to, from: msg.from,
-      errorCode: msg.errorCode, errorMessage: msg.errorMessage,
-      dateCreated: msg.dateCreated, dateSent: msg.dateSent, dateUpdated: msg.dateUpdated
-    })
+    res.json({ sid: msg.sid, status: msg.status, to: msg.to, from: msg.from, errorCode: msg.errorCode, errorMessage: msg.errorMessage, dateCreated: msg.dateCreated, dateSent: msg.dateSent, dateUpdated: msg.dateUpdated })
   } catch (e) { res.status(500).json({ error: String(e?.message || e) }) }
 })
 app.get('/api/debug/twilio', async (_req, res) => {
   try {
     if (!twilioClient) return res.status(500).json({ error: 'no_twilio_client' })
     const msgs = await twilioClient.messages.list({ limit: 10 })
-    res.json(msgs.map(m => ({
-      sid: m.sid, status: m.status, to: m.to, from: m.from,
-      errorCode: m.errorCode, errorMessage: m.errorMessage
-    })))
+    res.json(msgs.map(m => ({ sid: m.sid, status: m.status, to: m.to, from: m.from, errorCode: m.errorCode, errorMessage: m.errorMessage })))
   } catch (e) { res.status(500).json({ error: String(e?.message || e) }) }
 })
 app.get('/api/debug/origins', (req, res) => res.json({ allowed: ORIGINS, requestOrigin: req.headers.origin || null }))
 
 // Error handler
-app.use((err,_req,res,_next)=>{
-  console.error('[ERR]', err?.message || err)
-  res.status(500).json({ error: 'internal_error', detail: String(err?.message || err) })
-})
+app.use((err,_req,res,_next)=>{ console.error('[ERR]', err?.message || err); res.status(500).json({ error: 'internal_error', detail: String(err?.message || err) }) })
 
 // Boot
 await initDb()

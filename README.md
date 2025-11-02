@@ -1,15 +1,17 @@
-# Mixtli Transfer MAX — Backend
+# Mixtli Transfer MAX — Backend FIX (v2.15.2)
 
-**Node/Express + Postgres + Cloudflare R2**.
+Arreglos:
+- OTP con diagnóstico: `otp_db_error` vs `otp_channel_failed`
+- `ALLOW_DEMO_OTP=true` permite flujo de prueba (imprime OTP en logs)
+- CORS incluye `x-config-token`
+- Regex y sanitizados corregidos
 
-## Deploy (Render)
-1. New Web Service → Node 18+.
-2. Build command: `npm install --no-audit --no-fund`
-3. Start command: `node --enable-source-maps server.js`
-4. Add **Environment variables** using `.env.example` as template.
-5. Make sure `ALLOWED_ORIGINS` includes your Netlify domain.
-6. Open `/api/health` to verify.
+## Deploy en Render
+1. Node 22.x, Build: `npm install --no-audit --no-fund`, Start: `node --enable-source-maps server.js`.
+2. Variables `.env` según `.env.example` (ALLOWED_ORIGINS JSON array).
+3. (Opcional) `ALLOW_DEMO_OTP=true` para pruebas sin Twilio/SendGrid/SMTP.
 
-## Important
-- If you previously deployed an older schema, this version **auto-migrates** missing columns with `ALTER TABLE IF NOT EXISTS`.
-- Regex crash fixed: phone sanitizer now uses `/[()\s-]/g` (hyphen at end).
+## Smoke
+- `GET /api/health`
+- `POST /api/auth/register` → `{"ok":true,"msg":"otp_sent"}` o `otp_sent_demo`
+- Logs deben mostrar `[DEMO_OTP]` si demo.
