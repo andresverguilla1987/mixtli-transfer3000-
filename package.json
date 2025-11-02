@@ -1,28 +1,24 @@
 {
   "name": "mixtli-backend",
-  "version": "2.14.1",
-  "private": true,
+  "version": "2.14.3-lock",
   "type": "module",
-  "main": "server.js",
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.614.0",
-    "@aws-sdk/s3-request-presigner": "^3.614.0",
-    "archiver": "^6.0.2",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.2.0",
-    "jsonwebtoken": "^9.0.2",
-    "nodemailer": "^6.9.13",
-    "pg": "^8.11.5",
-    "twilio": "^4.22.0",
-    "node-fetch": "^3.3.2"
-  },
+  "engines": { "node": "22.x" },
   "scripts": {
     "start": "node server.js",
-    "start:prod": "NODE_ENV=production node server.js"
+    "ci:start": "node -e \"console.log(process.version)\" && node server.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.614.0",
+    "@aws-sdk/s3-request-presigner": "3.614.0",
+    "archiver": "6.0.2",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.19.2",
+    "express-rate-limit": "7.2.0",
+    "jsonwebtoken": "9.0.2",
+    "nodemailer": "6.9.13",
+    "pg": "8.11.5",
+    "twilio": "4.22.0",
+    "node-fetch": "3.3.2"
   }
 }
