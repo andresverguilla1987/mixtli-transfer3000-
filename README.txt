@@ -1,34 +1,29 @@
-# Mixtli Backend v2.13r
-Cambio: `/api/pack/create` devuelve **siempre** `"/share/:id"` (FORCE_RELATIVE_URLS=true).
+# Mixtli Backend v2.14.6-lock+wt+migrate
 
-## Variables Render
+## Deploy en Render
+1) Crea un **Web Service** Node 18+.
+2) Comando Build: `npm install --no-audit --no-fund`
+3) Start: `node --enable-source-maps server.js`
+4) Añade las variables de entorno (usa `.env.example` como guía).
+5) Asegúrate de poner `ALLOWED_ORIGINS` como **array JSON** válido.
+6) `BACKEND_PUBLIC_ORIGIN` debe apuntar a tu URL pública de Render (https://xxx.onrender.com).
+
+- Este server hace **auto-migración** de columnas nuevas al arrancar (`migrateDb()`), así no revienta `/api/pack/create` cuando faltan `password_hash` & co.
+- ZIP por streaming: primero intenta `GetObject` de S3/R2 y cae a `fetch()` si es público.
+- Protección con contraseña (header `x-package-password`), TTL, límites de descargas y rate limit por IP.
+
+## Frontend (Netlify)
+Crea `_redirects` en tu frontend con (reemplaza BACKEND_URL):
 ```
-PORT=10000
-DATABASE_URL=postgres://...
-JWT_SECRET=supersecret
-OTP_TTL_MIN=10
-
-# Twilio SMS-only
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_FROM=+1XXXXXXXXXX
-
-# R2 (sin bucket en endpoint)
-S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-S3_BUCKET=mixtlitransfer3000
-S3_REGION=auto
-S3_ACCESS_KEY_ID=...
-S3_SECRET_ACCESS_KEY=...
-S3_FORCE_PATH_STYLE=true
-
-# Forzar URL relativa del paquete
-FORCE_RELATIVE_URLS=true
+/api/*  https://<BACKEND_URL>/api/:splat  200
+/share/*  https://<BACKEND_URL>/share/:splat  200
 ```
+Súbelo en la raíz del **build** del front.
 
-## Netlify _redirects (frontend)
-```
-/ api/health 200
-/api/*     https://mixtli-transfer3000.onrender.com/:splat  200
-/share/*   https://mixtli-transfer3000.onrender.com/share/:splat  200
-/*         /index.html  200
-```
+## Smoke
+- `GET /api/health`
+- `POST /api/auth/register` {email|phone}
+- `POST /api/auth/verify-otp` -> recibe {token}
+- `POST /api/presign` (Bearer token) -> PUT al URL firmado -> `POST /api/complete`
+- `POST /api/pack/create` con files[] -> devuelve {url:'/share/:id'}
+- `GET /api/pack/:id/zip` (si hay password, envía header `x-package-password`)

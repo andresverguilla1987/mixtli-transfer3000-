@@ -1,11 +1,2 @@
-# ========= Mixtli Transfer — Netlify Routing =========
-# Proxy API (Render) — keep /api path in the browser
-/api/*  https://mixtli-transfer3000.onrender.com/api/:splat  200
-
-# If you added /auth without /api on the backend aliases, keep these too:
-/auth/* https://mixtli-transfer3000.onrender.com/auth/:splat  200
-
-# SPA routes (share pages etc.)
-/share/*   /index.html   200
-# Optional: fallback every other client route to SPA
-/*         /index.html   200
+/api/*  https://<your-backend>.onrender.com/api/:splat  200
+/share/*  https://<your-backend>.onrender.com/share/:splat  200
