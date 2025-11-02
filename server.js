@@ -1,4 +1,4 @@
-// Mixtli Transfer — Backend v2.14.1
+// Mixtli Transfer — Backend v2.14.2
 // SMS-only (Twilio) + OTP + CORS + RateLimit + Purga OTP/Paquetes
 // S3/R2 presign + Packages + ZIP por streaming
 // /api/pack/create devuelve URL **relativa**: "/share/:id"
@@ -145,7 +145,7 @@ function rand6() { return String(Math.floor(100000 + Math.random() * 900000)) }
 
 function normalizePhone(p) {
   if (!p) return ''
-  let s = String(p).trim().replace(/[\s\-\(\)]/g, '')
+  let s = String(p).trim().replace(/[\s\-()]/g, '')
   if (s.toLowerCase().startsWith('whatsapp:')) s = s.slice('whatsapp:'.length)
   if (!s.startsWith('+') && /^\d{10,15}$/.test(s)) s = '+' + s
   return s
@@ -156,12 +156,12 @@ function normalizeId(email, phone) {
   return em || ph
 }
 
-// safeName robusto (sin rangos inválidos; elimina acentos)
+// safeName robusto: normaliza, remueve diacríticos, permite [A-Za-z0-9._-]
 function safeName(name = '') {
   return String(name)
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Za-z0-9._-]+/g, '_') // guion al final
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
     .slice(0, 180)
 }
 
@@ -273,11 +273,15 @@ if (S3_ENDPOINT && S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY) {
     forcePathStyle: FORCE_PATH
   })
 }
+function sanitizeEndpoint(ep) {
+  return String(ep || '').replace(/\/+$/,'')
+}
 async function buildPublicUrl(key) {
-  if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/+$/,'')}/${key}`
-  const host = S3_ENDPOINT.replace(/^https?:\/\//, '').replace(/\/+$/,'')
+  if (PUBLIC_BASE_URL) return `${sanitizeEndpoint(PUBLIC_BASE_URL)}/${key}`
+  const endpoint = sanitizeEndpoint(S3_ENDPOINT)
+  const host = endpoint.replace(/^https?:\/\//, '')
   return FORCE_PATH
-    ? `${S3_ENDPOINT.replace(/\/+$/,'')}/${S3_BUCKET}/${key}`
+    ? `${endpoint}/${S3_BUCKET}/${key}`
     : `https://${S3_BUCKET}.${host}/${key}`
 }
 
@@ -318,7 +322,8 @@ const otpLimiter = rateLimit({
 // -------------------- Rutas base --------------------
 app.get('/', (_req, res) => res.type('text/plain').send('OK'))
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.1', channel: 'sms-only' }))
+  res.json({ ok: true, time: new Date().toISOString(), ver: '2.14.2', channel: 'sms-only' }))
+app.head('/api/health', (_req, res) => res.status(200).end())
 
 app.get('/api/auth/whoami', (req, res) => {
   const uid = authUid(req)
@@ -451,7 +456,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
     const relative = String(FORCE_RELATIVE_URLS).toLowerCase() === 'true'
     const url = relative
       ? sharePath
-      : ((PUBLIC_BASE_URL || '') ? (PUBLIC_BASE_URL.replace(/\/+$/,'') + sharePath) : sharePath)
+      : ((PUBLIC_BASE_URL || '') ? (sanitizeEndpoint(PUBLIC_BASE_URL) + sharePath) : sharePath)
 
     res.json({ ok: true, id: pid, url, expires_at: r.rows[0].expires_at })
   } catch (e) {
@@ -460,7 +465,7 @@ app.post('/api/pack/create', requireAuth, async (req, res) => {
   }
 })
 
-// JSON del paquete (para previews/embeds)
+// JSON del paquete
 app.get('/api/pack/:id', async (req, res) => {
   try {
     const id = req.params.id
