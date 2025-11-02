@@ -1,24 +1,25 @@
 {
-  "name": "mixtli-backend-wt",
-  "version": "2.14.6",
+  "name": "mixtli-backend",
+  "version": "2.15.0-wt",
   "type": "module",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "NODE_ENV=production node server.js"
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.684.0",
-    "@aws-sdk/s3-request-presigner": "^3.684.0",
-    "archiver": "^7.0.1",
+    "@aws-sdk/client-s3": "^3.645.0",
+    "@aws-sdk/s3-request-presigner": "^3.645.0",
+    "archiver": "^6.0.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.2",
+    "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
     "node-fetch": "^3.3.2",
-    "nodemailer": "^6.9.14",
-    "pg": "^8.13.1",
-    "twilio": "^5.3.6"
+    "nodemailer": "^6.9.13",
+    "pg": "^8.11.5",
+    "twilio": "^4.22.0"
+  },
+  "scripts": {
+    "start": "node --enable-source-maps server.js"
   }
 }
