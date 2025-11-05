@@ -1,17 +1,46 @@
-# Mixtli Transfer MAX — Backend FIX (v2.15.2)
+# Mixtli Plan Buttons (Render ZIP)
 
-Arreglos:
-- OTP con diagnóstico: `otp_db_error` vs `otp_channel_failed`
-- `ALLOW_DEMO_OTP=true` permite flujo de prueba (imprime OTP en logs)
-- CORS incluye `x-config-token`
-- Regex y sanitizados corregidos
+Pequeño backend listo para **Render** que habilita los **botones de paquetes (planes)** sin tocar tu módulo **OTP**.
+
+## Endpoints
+- `GET /api/health` → salud
+- `GET /api/plan` → plan actual y límites (por token/usuario)
+- `POST /api/plan/upgrade` → body `{ "plan": "PRO" | "PROMAX" }`
+- `POST /api/plan/downgrade` → body `{ "plan": "FREE" }`
+
+> Nota: Guarda el plan **en memoria** por `Authorization: Bearer <token>` o `X-User-Id` (si no envías, usa un slot por defecto). Ideal para demo/integración rápida. Si requieres persistencia real, cambia a Postgres más adelante.
 
 ## Deploy en Render
-1. Node 22.x, Build: `npm install --no-audit --no-fund`, Start: `node --enable-source-maps server.js`.
-2. Variables `.env` según `.env.example` (ALLOWED_ORIGINS JSON array).
-3. (Opcional) `ALLOW_DEMO_OTP=true` para pruebas sin Twilio/SendGrid/SMTP.
+1. Crea un **nuevo servicio Web** en Render (Node).
+2. Sube este ZIP directamente (Deploy from a **Blueprint** o **directorio**).
+3. **Build Command**: _no requiere build_
+4. **Start Command**: `node server.js`
+5. **Runtime**: Node 18+
+6. Variables de entorno:
+   - `PORT` = `10000` (opcional)
+   - `ALLOWED_ORIGINS` = `["https://lighthearted-froyo-9dd448.netlify.app", "http://localhost:5173"]`
+     - Ajusta el dominio de tu Netlify si cambió.
 
-## Smoke
-- `GET /api/health`
-- `POST /api/auth/register` → `{"ok":true,"msg":"otp_sent"}` o `otp_sent_demo`
-- Logs deben mostrar `[DEMO_OTP]` si demo.
+## Cómo integrarlo con tu UI
+- Para **mostrar el plan actual** y los **límites**: `GET https://<tu-app-onrender>.onrender.com/api/plan`
+- Para **subir a PRO**: `POST /api/plan/upgrade` con body `{ "plan": "PRO" }`
+- Para **subir a PROMAX**: `POST /api/plan/upgrade` con body `{ "plan": "PROMAX" }`
+- Para **bajar a FREE**: `POST /api/plan/downgrade` con body `{ "plan": "FREE" }`
+
+### Ejemplo de fetch (frontend)
+```js
+async function upgrade(plan){
+  const res = await fetch("/api/plan/upgrade", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan })
+  });
+  const data = await res.json();
+  console.log(data);
+}
+```
+
+## Importante
+- CORS estricto por `ALLOWED_ORIGINS` (array JSON).
+- **No toca OTP** ni autenticación existente.
+- Puedes colocar delante un **reverse proxy** o integrar estos endpoints bajo `/api` del backend principal más adelante.
