@@ -334,13 +334,8 @@ app.get('/api/diag', (req,res)=>{
 })
 app.get('/api/auth/whoami', (req,res)=>{ const uid=authUid(req); if(!uid) return res.status(401).json({ ok:false }); res.json({ ok:true, uid }) })
 
-// Aliases para compatibilidad
-app.post('/auth/register',   (req,_res,next)=>{ req.url='/api/auth/register';   next() })
-app.post('/auth/verify-otp', (req,_res,next)=>{ req.url='/api/auth/verify-otp'; next() })
-app.post('/auth/verify',     (req,_res,next)=>{ req.url='/api/auth/verify-otp'; next() })
-
-/* -------------------- OTP -------------------- */
-app.post('/api/auth/register', otpLimiter, async (req,res)=>{
+/* -------------------- OTP (sin rewrites; soporta /api/auth/* y /auth/*) -------------------- */
+async function handleRegister(req, res) {
   try {
     const { email='', phone='' } = req.body || {}
     const id = normalizeId(email, phone)
@@ -356,12 +351,19 @@ app.post('/api/auth/register', otpLimiter, async (req,res)=>{
       return res.json({ ok:true, msg:'otp_sent' })
     } catch (e) {
       console.error('[otp_channel_failed]', e?.message||e)
-      if (String(ALLOW_DEMO_OTP).toLowerCase()==='true') { console.log('[DEMO_OTP]', id, code); return res.json({ ok:true, msg:'otp_sent_demo', demo:true }) }
+      if (String(ALLOW_DEMO_OTP).toLowerCase()==='true') {
+        console.log('[DEMO_OTP]', id, code)
+        return res.json({ ok:true, msg:'otp_sent_demo', demo:true })
+      }
       return res.status(500).json({ error:'otp_channel_failed' })
     }
-  } catch (e) { console.error('[register_failed]', e); res.status(500).json({ error:'otp_send_failed' }) }
-})
-app.post('/api/auth/verify-otp', async (req,res)=>{
+  } catch (e) {
+    console.error('[register_failed]', e)
+    res.status(500).json({ error:'otp_send_failed' })
+  }
+}
+
+async function handleVerify(req, res) {
   try{
     const { email='', phone='', otp } = req.body || {}
     const id = normalizeId(email, phone)
@@ -388,10 +390,18 @@ app.post('/api/auth/verify-otp', async (req,res)=>{
         [normalizePhone(phone)]
       )).rows[0]
     }
+
     const token = signToken(row)
     res.json({ token, user: row })
-  } catch (e) { console.error('[verify_failed]', e); res.status(500).json({ error:'verify_failed' }) }
-})
+  } catch (e) {
+    console.error('[verify_failed]', e)
+    res.status(500).json({ error:'verify_failed' })
+  }
+}
+
+/* Registra ambas variantes de path (sin req.url hacks) */
+app.post(['/api/auth/register','/auth/register'], otpLimiter, handleRegister)
+app.post(['/api/auth/verify-otp','/auth/verify-otp','/auth/verify'], handleVerify)
 
 /* -------------------- PLANES -------------------- */
 app.get('/api/plan', requireAuth, async (req,res)=>{
@@ -677,4 +687,4 @@ app.use((err,_req,res,_next)=>{ console.error('[ERR]', err?.message || err); res
 await initDb()
 app.listen(parseInt(PORT,10), ()=>console.log('Mixtli Backend on :' + PORT))
 
-// EOF padding
+// EOF
