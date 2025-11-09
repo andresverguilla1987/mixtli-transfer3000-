@@ -15,7 +15,8 @@ import { Readable } from 'node:stream'
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
 
 if (!globalThis.fetch) {
-  const { default: nodeFetch } = await import('node-fetch'); globalThis.fetch = nodeFetch
+  const { default: nodeFetch } = await import('node-fetch')
+  globalThis.fetch = nodeFetch
 }
 
 /* -------------------- CONFIG GUARD -------------------- */
@@ -339,7 +340,7 @@ async function handleRegister(req,res){ try {
     if (email) await sendMail(email.trim().toLowerCase(), 'Tu código Mixtli', `Tu código es: ${code}\nExpira en ${ttlMin} minutos.`)
     else await sendSmsOnly(phone, `Mixtli: tu código es ${code}. Expira en ${ttlMin} min.`)
     return res.json({ ok:true, msg:'otp_sent' })
-  } catch (e) { console.error('[otp_channel_failed]', e?.message||e); return res.status(500).json({ error:'otp_channel_failed' }) }
+  } catch (e) { console.error('[otp_channel_failed]', e?.message||e); if (String(ALLOW_DEMO_OTP).toLowerCase()==='true'){ console.log('[DEMO_OTP]', id, code); return res.json({ ok:true, msg:'otp_sent_demo', demo:true }) } return res.status(500).json({ error:'otp_channel_failed' }) }
 } catch (e) { console.error('[register_failed]', e); res.status(500).json({ error:'otp_send_failed' }) } }
 
 async function handleVerify(req,res){ try {
@@ -527,8 +528,8 @@ app.get('/share/:id', async (req,res)=>{
       </div>
       <script>
         (function(){
-          const needPwd = ${'${needPwd ? "true":"false"}'};
-          const zipUrl = ${'${JSON.stringify(zipAbs)}'};
+          const needPwd = ${needPwd ? 'true' : 'false'};
+          const zipUrl = ${JSON.stringify(zipAbs)};
           if (!needPwd) return;
           const btn = document.getElementById('dlAll');
           btn?.addEventListener('click', async () => {
